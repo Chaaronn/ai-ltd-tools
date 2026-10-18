@@ -1,0 +1,27 @@
+[package]
+name = "track-builder"
+version = "0.1.0"
+edition = "2024"
+default-run = "track-builder"
+rust-version = "1.95"
+
+[dependencies]
+anyhow = "1.0.104"
+dirs = "7.0.0"
+eframe = "0.37.0"
+flate2 = "1.1.10"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "webp", "gif"] }
+resvg = "0.48.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+uuid = { version = "1.28.0", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+rfd = "0.17.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.dev]
+opt-level = 2
