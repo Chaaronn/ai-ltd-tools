@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ideation: Evolution Lab additions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f4f1eb;
+  --ink: #1a1d21;
+  --muted: #5a6169;
+  --card: #fffdf8;
+  --line: #d8d2c6;
+  --accent: #c45c26;
+  --accent-soft: #f3e4d8;
+  --ok: #2f6b4f;
+  --chip: #e8e2d6;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(ellipse 80% 50% at 10% -10%, #efe6d8 0%, transparent 55%),
+    linear-gradient(180deg, #f7f4ee 0%, var(--bg) 40%);
+  line-height: 1.55;
+}
+.wrap { max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+header h1 {
+  font-family: "IBM Plex Serif", Georgia, serif;
+  font-weight: 600;
+  font-size: clamp(1.75rem, 4vw, 2.35rem);
+  line-height: 1.15;
+  margin: 0.4rem 0 0.75rem;
+  letter-spacing: -0.02em;
+}
+.meta {
+  display: flex; flex-wrap: wrap; gap: 0.5rem 1rem;
+  color: var(--muted); font-size: 0.9rem; margin-bottom: 1.75rem;
+}
+.meta strong { color: var(--ink); font-weight: 550; }
+nav.toc {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.85rem 1rem;
+  margin: 1.5rem 0 2rem;
+}
+nav.toc a { color: var(--ink); text-decoration: none; border-bottom: 1px solid transparent; }
+nav.toc a:hover { border-bottom-color: var(--accent); color: var(--accent); }
+nav.toc ol { margin: 0.4rem 0 0; padding-left: 1.25rem; }
+nav.toc li { margin: 0.25rem 0; }
+h2 {
+  font-family: "IBM Plex Serif", Georgia, serif;
+  font-size: 1.35rem;
+  margin: 2.25rem 0 0.75rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+}
+h3 { font-size: 1.1rem; margin: 0 0 0.5rem; }
+.grounding, .axes {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1rem 1.15rem;
+}
+.grounding ul, .axes ul { margin: 0.4rem 0 0; padding-left: 1.2rem; }
+.grounding li, .axes li { margin: 0.3rem 0; }
+.idea {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1.15rem 1.25rem 1.25rem;
+  margin: 1.25rem 0;
+  scroll-margin-top: 1rem;
+}
+.idea .rank {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 0.15rem 0.45rem;
+  border-radius: 3px;
+  margin-bottom: 0.45rem;
+}
+.chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0.65rem 0 0.85rem; }
+.chip {
+  font-size: 0.78rem;
+  background: var(--chip);
+  color: var(--muted);
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+}
+.chip strong { color: var(--ink); font-weight: 550; }
+.field { margin: 0.65rem 0; }
+.field .label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.2rem;
+}
+.basis code {
+  font-size: 0.86em;
+  background: #efeae1;
+  padding: 0.05em 0.3em;
+  border-radius: 3px;
+}
+table.reject {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+table.reject th, table.reject td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.55rem 0.65rem;
+  border-bottom: 1px solid var(--line);
+}
+table.reject th { background: #ebe5d9; font-weight: 600; }
+footer.composition-signal {
+  margin-top: 2.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.diagram {
+  margin: 0.85rem 0 0.35rem;
+  padding: 0.75rem;
+  background: #faf7f1;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.diagram svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+.caption { font-size: 0.8rem; color: var(--muted); margin: 0.35rem 0 0; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="meta">
+    <span><strong>Date</strong> <time datetime="2026-10-18">2026-10-18</time></span>
+    <span><strong>Topic</strong> evolution-lab-additions</span>
+    <span><strong>Focus</strong> Evolution Lab</span>
+    <span><strong>Mode</strong> repo-grounded</span>
+  </div>
+  <h1>Ideation: Evolution Lab additions</h1>
+  <p>Ranked directions for what to add next to the Evolution Lab — the evaluate-only coaching tab over <code>.evolution</code> saves — without abandoning its honesty grammar or sole-write keeper boundary.</p>
+</header>
+
+<section id="grounding">
+  <h2>Grounding Context</h2>
+  <div class="grounding">
+    <p><strong>Codebase context.</strong> Evolution Lab reads <code>%APPDATA%\AI Learns To Drive\evolution\*.evolution</code>, analyses in memory, and writes only an optional <code>(best lap)</code> keeper copy. Pipeline: forks → runs → verdict → compare, plus overview, designs, advice, projection, and netviz. Fair comparison splits runs when settings, rewards, track, or architecture change; forks dedupe shared prefix history; verdicts use placebo-calibrated |z| and speak Helped / Hurt / can’t tell with evidence strength labels.</p>
+    <ul>
+      <li><strong>Pain:</strong> median run ~4 generations; most setting changes untestable; sparse snapshot spacing; no activations in saves; design changes align to snapshot interval.</li>
+      <li><strong>Leverage:</strong> advice and timing without game hooks; designs with-vs-without tables; fork structure as matched pairs; projection + stage playbook; P2 already names snapshot diff and stronger stats.</li>
+      <li><strong>Boundaries:</strong> no auto-training, no editing <code>.evolution</code>, no applying settings in-game; CSV / notes / cloud / file-based sharing deliberately dropped.</li>
+      <li><strong>External:</strong> adjacent neuroevolution explorers and local run trackers exist; no player-facing racing neuroevolution coach found. Game already treats settings as Discord-shareable currency.</li>
+      <li><strong>Past learnings:</strong> no <code>docs/solutions/</code> corpus in this repo.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="axes">
+  <h2>Topic Axes</h2>
+  <div class="axes">
+    <ul>
+      <li>Training coaching and verdicts</li>
+      <li>Network and sensor inspection</li>
+      <li>Run comparison and settings history</li>
+      <li>Lap projection and progress storytelling</li>
+      <li>Sharing and social / build currency</li>
+    </ul>
+  </div>
+</section>
+
+<section id="ranked-ideas">
+  <h2>Ranked Ideas</h2>
+  <nav class="toc" aria-label="Jump to ideas">
+    <strong>Jump to</strong>
+    <ol>
+      <li><a href="#idea-1">Fork duel</a></li>
+      <li><a href="#idea-2">Detectability / information-cost planner</a></li>
+      <li><a href="#idea-3">One headline timing resolver</a></li>
+      <li><a href="#idea-4">Swap card</a></li>
+      <li><a href="#idea-5">Diagnosis-gated advice</a></li>
+      <li><a href="#idea-6">Cohort ghost / cold-start projection</a></li>
+      <li><a href="#idea-7">Evidence clipboard card</a></li>
+    </ol>
+  </nav>
+
+  <article class="idea" id="idea-1">
+    <span class="rank">Rank 1</span>
+    <h3>Fork duel</h3>
+    <div class="chips">
+      <span class="chip"><strong>Axis</strong> Run comparison and settings history</span>
+      <span class="chip"><strong>Confidence</strong> 85%</span>
+      <span class="chip"><strong>Complexity</strong> Medium</span>
+    </div>
+    <div class="field"><span class="label">Description</span>
+      Today forks exist so copies never double-count evidence. Invert the leftover signal: two saves that share an identical generation-prefix and then diverge under different settings are a matched A/B from the same weights. Add a Fork duel panel that aligns siblings at <code>own_from</code>, compares lap gains over equal generation windows (fairness rules: same track/rewards, skip keeper empties), and pools pairs before claiming strong evidence.
+    </div>
+    <div class="diagram" aria-hidden="true">
+      <svg viewBox="0 0 520 140" xmlns="http://www.w3.org/2000/svg" role="img">
+        <title>Shared prefix then two diverging arms</title>
+        <rect x="20" y="55" width="160" height="30" rx="4" fill="#2f6b4f"/>
+        <text x="100" y="75" text-anchor="middle" fill="#fff" font-size="12" font-family="IBM Plex Sans,sans-serif">shared prefix</text>
+        <path d="M180 70 L240 35 L480 35" stroke="#c45c26" stroke-width="3" fill="none"/>
+        <path d="M180 70 L240 105 L480 105" stroke="#1a1d21" stroke-width="3" fill="none"/>
+        <text x="360" y="28" fill="#c45c26" font-size="12" font-family="IBM Plex Sans,sans-serif">arm A · settings X</text>
+        <text x="360" y="122" fill="#1a1d21" font-size="12" font-family="IBM Plex Sans,sans-serif">arm B · settings Y</text>
+        <circle cx="180" cy="70" r="5" fill="#1a1d21"/>
+        <text x="180" y="95" text-anchor="middle" fill="#5a6169" font-size="11" font-family="IBM Plex Sans,sans-serif">own_from</text>
+      </svg>
+      <p class="caption">Identical start, then diverging experiments — the Lab’s cleanest natural trial.</p>
+    </div>
+    <div class="field basis"><span class="label">Basis</span>
+      <code>direct:</code> <code>forks.rs</code> shared-prefix / <code>own_from</code> (“copies never double the evidence”); <code>advice.rs</code> already recognises save-a-copy; <code>compare</code> fairness filters and pooled n≥5 gating reusable.
+      <code>reasoned:</code> before/after verdicts fight short runs; parallel arms from the same weights shrink that confound.
+    </div>
+    <div class="field"><span class="label">Rationale</span>
+      This is the rare addition that creates stronger evidence without new game hooks — and it rewards a ritual players already do (copy before a risky change).
+    </div>
+    <div class="field"><span class="label">Downsides</span>
+      Real libraries may have few divergent-settings pairs; evolutionary noise and selection bias remain; keeper forks with identical settings must be excluded from “duels”.
+    </div>
+  </article>
+
+  <article class="idea" id="idea-2">
+    <span class="rank">Rank 2</span>
+    <h3>Detectability / information-cost planner</h3>
+    <div class="chips">
+      <span class="chip"><strong>Axis</strong> Training coaching and verdicts</span>
+      <span class="chip"><strong>Confidence</strong> 80%</span>
+      <span class="chip"><strong>Complexity</strong> Medium</span>
+    </div>
+    <div class="field"><span class="label">Description</span>
+      Turn “wait N more gens” into a price list: given the player’s placebo |z| noise and current hold length, show the minimum detectable lap-gain (per 10 gens) that would clear the threshold now, and how many more generations would buy a smaller effect. After a WithinNoise verdict, say what size of effect was undetectable — so “can’t tell” stops meaning “do nothing happened”.
+    </div>
+    <div class="field basis"><span class="label">Basis</span>
+      <code>direct:</code> <code>verdict.rs</code> <code>threshold()</code> (95th percentile placebo |z|, fallback 4.4 below 50 points); <code>gens_to_verdict</code> / GUI “k more gens…”; spec success metric median run 4→15+.
+      <code>reasoned:</code> MDE scales with noise × window length — the maths already sits in the Lab.
+    </div>
+    <div class="field"><span class="label">Rationale</span>
+      Longer holds are the product’s north-star behaviour change; players need a reason to hold that isn’t just “trust us”.
+    </div>
+    <div class="field"><span class="label">Downsides</span>
+      Fallback threshold dominates thin libraries; numbers can intimidate if poorly labelled; overlaps a “CantTell theatre” framing if both ship as larger surfaces.
+    </div>
+  </article>
+
+  <article class="idea" id="idea-3">
+    <span class="rank">Rank 3</span>
+    <h3>One headline timing resolver</h3>
+    <div class="chips">
+      <span class="chip"><strong>Axis</strong> Training coaching and verdicts</span>
+      <span class="chip"><strong>Confidence</strong> 80%</span>
+      <span class="chip"><strong>Complexity</strong> Low</span>
+    </div>
+    <div class="field"><span class="label">Description</span>
+      Collapse stall (50 gens), projection flat (40), and netviz “not improving” (30) into one top-line instruction with a “why” that names which instrument fired. Keep the backup/keeper prompt first and separate. Preserve Stuck’s mutation-conditional wording.
+    </div>
+    <div class="field basis"><span class="label">Basis</span>
+      <code>direct:</code> three constants in <code>runs.rs</code> / <code>projection.rs</code> / <code>netviz.rs</code>; advice timing chain and diagnosis box speak independently today; tests assert first timing suggestion shape.
+    </div>
+    <div class="field"><span class="label">Rationale</span>
+      When three boxes disagree, players discount all of them. One instruction is the cheapest path to earlier stall intervention.
+    </div>
+    <div class="field"><span class="label">Downsides</span>
+      Hides intentional threshold nuance unless the “why” carries it; needs careful precedence table and test updates.
+    </div>
+  </article>
+
+  <article class="idea" id="idea-4">
+    <span class="rank">Rank 4</span>
+    <h3>Swap card</h3>
+    <div class="chips">
+      <span class="chip"><strong>Axis</strong> Network and sensor inspection</span>
+      <span class="chip"><strong>Confidence</strong> 85%</span>
+      <span class="chip"><strong>Complexity</strong> Low</span>
+    </div>
+    <div class="field"><span class="label">Description</span>
+      Now training already flags barely-used non-raycast sensors and tells the player to check Network designs manually. Join the two: for each flagged sensor, list replacement candidates from designs with-vs-without evidence per stage, with n and strength labels (and “no evidence yet” when thin). Keep the weight-estimate caveat visible.
+    </div>
+    <div class="field basis"><span class="label">Basis</span>
+      <code>direct:</code> <code>gui_lab.rs</code> “candidates to swap… Check the inputs table…”; <code>designs.rs</code> features some-but-not-all networks use; “which 7” sensor budget copy.
+    </div>
+    <div class="field"><span class="label">Rationale</span>
+      Sensor choice is a once-per-network, high-leverage decision — the cross-tab is the step most likely to be skipped.
+    </div>
+    <div class="field"><span class="label">Downsides</span>
+      With/without evidence is confounded; weight-based usage can mis-rank; thin libraries show empty cards often.
+    </div>
+  </article>
+
+  <article class="idea" id="idea-5">
+    <span class="rank">Rank 5</span>
+    <h3>Diagnosis-gated advice</h3>
+    <div class="chips">
+      <span class="chip"><strong>Axis</strong> Network and sensor inspection</span>
+      <span class="chip"><strong>Confidence</strong> 75%</span>
+      <span class="chip"><strong>Complexity</strong> Low</span>
+    </div>
+    <div class="field"><span class="label">Description</span>
+      Wire <code>netviz::Diagnosis</code> (Learning / Fine-tuning / Drifting / Stuck) into the advice resolver so channels stop contradicting each other: Learning silences playbook noise; Stuck elevates change-something playbook; Drifting suppresses “raise mutation” when already exploring. Suggestions remain shown-never-applied.
+    </div>
+    <div class="field basis"><span class="label">Basis</span>
+      <code>direct:</code> diagnosis lives in netviz/GUI; advice pipeline does not reference Diagnosis today; documented timing → playbook → own history → verdicts order.
+    </div>
+    <div class="field"><span class="label">Rationale</span>
+      Trust dies when Inside the network says Stuck and Suggestions still say “wait”. Gating restores one voice without new data.
+    </div>
+    <div class="field"><span class="label">Downsides</span>
+      Coarse state machine can hide useful weak hints; needs explicit precedence policy players can learn.
+    </div>
+  </article>
+
+  <article class="idea" id="idea-6">
+    <span class="rank">Rank 6</span>
+    <h3>Cohort ghost / cold-start projection</h3>
+    <div class="chips">
+      <span class="chip"><strong>Axis</strong> Lap projection and progress storytelling</span>
+      <span class="chip"><strong>Confidence</strong> 75%</span>
+      <span class="chip"><strong>Complexity</strong> Medium</span>
+    </div>
+    <div class="field"><span class="label">Description</span>
+      When the own-series exponential fit is unavailable (&lt;4 improvements, random track, early gens), borrow a library prior: percentile lap-by-generation envelopes for the same track/stage, labelled “others on this track”, with n. Optionally show how many gens sibling networks needed for −0.1 s from a similar starting lap.
+    </div>
+    <div class="diagram" aria-hidden="true">
+      <svg viewBox="0 0 520 150" xmlns="http://www.w3.org/2000/svg" role="img">
+        <title>Own curve vs cohort band</title>
+        <rect x="40" y="20" width="440" height="100" fill="#faf7f1" stroke="#d8d2c6"/>
+        <path d="M60 95 C140 90, 200 70, 280 55 C340 45, 400 40, 460 38" fill="none" stroke="#c45c26" stroke-width="2.5"/>
+        <path d="M60 110 C150 100, 220 85, 300 75 C380 68, 430 65, 460 64" fill="none" stroke="#2f6b4f" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.7"/>
+        <path d="M60 80 C150 70, 220 50, 300 42 C380 36, 430 34, 460 33" fill="none" stroke="#2f6b4f" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.7"/>
+        <text x="70" y="40" fill="#c45c26" font-size="11" font-family="IBM Plex Sans,sans-serif">your fit</text>
+        <text x="300" y="118" fill="#2f6b4f" font-size="11" font-family="IBM Plex Sans,sans-serif">cohort band (others on this track)</text>
+      </svg>
+      <p class="caption">When your curve is silent, the library still has a story — clearly labelled as borrowed.</p>
+    </div>
+    <div class="field basis"><span class="label">Basis</span>
+      <code>direct:</code> <code>projection.rs</code> <code>MIN_IMPROVEMENTS=4</code>, random-track early return; comparable-runs already pools other networks at stage; spec metric “25% fewer gens to target on a new track”.
+    </div>
+    <div class="field"><span class="label">Rationale</span>
+      Projection is dark exactly when players most want a forecast — new track, new network. The library is the prior the Lab already owns.
+    </div>
+    <div class="field"><span class="label">Downsides</span>
+      Thin libraries yield empty bands; cross-network mix can mislead if vehicles/rewards differ; must never look like the own-fit.
+    </div>
+  </article>
+
+  <article class="idea" id="idea-7">
+    <span class="rank">Rank 7</span>
+    <h3>Evidence clipboard card</h3>
+    <div class="chips">
+      <span class="chip"><strong>Axis</strong> Sharing and social / build currency</span>
+      <span class="chip"><strong>Confidence</strong> 70%</span>
+      <span class="chip"><strong>Complexity</strong> Low</span>
+    </div>
+    <div class="field"><span class="label">Description</span>
+      File-based sharing was dropped because it creates files. Add copy-to-clipboard only: a pasteable card with track, stage, best lap, diagnosis, strongest verdict + strength, and a one-line playbook recipe — no disk write (keeper remains the sole fs write). Defer paste-import until the game’s Copy-settings text format is known and testable.
+    </div>
+    <div class="field basis"><span class="label">Basis</span>
+      <code>direct:</code> spec drops CSV/notes/archives/sharing-as-files; <code>lab_never_writes_files</code> bans fs APIs only; <code>overview::recipe</code> already builds “how it got there”; no clipboard in Lab <code>src</code> today.
+      <code>external:</code> game Copy settings for Discord; Pokémon/Showdown-style claim cards.
+    </div>
+    <div class="field"><span class="label">Rationale</span>
+      Unlocks the social loop players already have around settings, while advertising the Lab’s honesty labels — without reopening exports.
+    </div>
+    <div class="field"><span class="label">Downsides</span>
+      May be read as “sharing” against the spirit of the drop list; format churn; paste-import alone is blocked until the game’s text format is reverse-engineered.
+    </div>
+  </article>
+</section>
+
+<section id="rejection">
+  <h2>Rejection Summary</h2>
+  <table class="reject">
+    <thead>
+      <tr><th>#</th><th>Idea</th><th>Reason rejected</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>Stall-escape odds</td><td>Weak — per-kind n too thin given sparse testable changes</td></tr>
+      <tr><td>2</td><td>Change ledger / experiment hygiene</td><td>Mostly overlaps existing overview “% too soon” + detectability planner</td></tr>
+      <tr><td>3</td><td>Track-switch forgetting detector</td><td>Snapshot spacing cannot align weight churn to the switch window</td></tr>
+      <tr><td>4</td><td>Milestone attribution</td><td>Sound polish but below meeting-test vs stronger survivors</td></tr>
+      <tr><td>5</td><td>Paste tip-checker (import)</td><td>Deferred — foreign settings format not in repo; keep copy-out only</td></tr>
+      <tr><td>6</td><td>Snapshot rescue</td><td>Weak — post-best snapshot, policy expands sole write; risky vs fence tests</td></tr>
+      <tr><td>7</td><td>DSMB futility board / interim lean</td><td>Weak — interim lean fights <code>min_side</code>; toast alone kept as future of #2/#3</td></tr>
+      <tr><td>8</td><td>Habit scorecard</td><td>Sound but product KPI theatre; overlaps overview; meeting-test fail</td></tr>
+      <tr><td>9</td><td>Ghost drive activations</td><td>Forward pass not in repo; unverifiable; too expensive</td></tr>
+      <tr><td>10</td><td>Forecast backtest of constants</td><td>Sound but lower leverage than cohort projection / one headline this round</td></tr>
+      <tr><td>11</td><td>Coverage / MAP-Elites heatmap</td><td>Sound; deferred behind Fork duel for comparison axis</td></tr>
+      <tr><td>12</td><td>Opportunity-cost / search-exhaustion</td><td>Weak / sparse; overlaps one-headline + coverage</td></tr>
+      <tr><td>13</td><td>Fairness microscope / CantTell theatre / CPP</td><td>Largely already surfaced; CPP ungrounded</td></tr>
+      <tr><td>14</td><td>Weight stratigraphy / snapshot-diff story</td><td>Partial already in UI; P2 snapshot diff better as later brainstorm</td></tr>
+      <tr><td>15</td><td>Crossdated settings rings</td><td>Refuted — forks already hash-align; analogy without pain</td></tr>
+      <tr><td>16</td><td>Structural hearing / N-1 contingency</td><td>Weak — re-runs usage proxy; little over swap card</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer class="composition-signal">
+  Composed 2026-10-18 by ce-ideate · focus “Evolution Lab” · run a21579f5 · 7 ranked (≈40 raw, 16 cut) across 5 axes
+</footer>
+</div>
+</body>
+</html>

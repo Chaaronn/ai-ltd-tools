@@ -33,6 +33,12 @@ The **Evolution Lab** tab (top of the window) reads your saved networks from
 changes your saves. Its one write is optional: a "<name> (best lap)" copy of a network
 whenever it sets a new best lap, overwritten only by a faster one, so a later regression can't lose it.
 
+- **Rewards:** reward changes get a before/after verdict on lap time (scores aren't comparable across rewards), and
+  What's worked best has a reward setups table: lap gain by stage, generations to a first lap, fastest lap.
+- **Track names:** built-in tracks show the network that trained most on them, and you can name them (stored in
+  the tool's settings, not the game's folder).
+- **Swap candidates:** when a sensor is barely used, Now training lists sensors to try instead, with the evidence
+  from your other networks at the same stage.
 - **Inside the network** on Now training: the car's raycasts and sensors coloured by how much the network uses them
   (estimated from its weights), the network drawn layer by layer, and whether it's still learning: a Learning / Fine-tuning / Drifting / Stuck
   verdict with advice, snapshot-by-snapshot changes, input usage over time, which outputs are learning, and idle neurons.

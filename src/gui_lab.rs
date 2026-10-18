@@ -107,6 +107,14 @@ pub struct Lab {
     needs_copy: (usize, std::collections::HashSet<String>),
     /// What the timeline draws.
     chart: ChartOpts,
+    /// Reward setups table: show setups with fewer than 3 runs too.
+    rewards_all: bool,
+    /// Track names being typed (TrackId -> text), and a rename to apply next frame.
+    name_drafts: std::collections::HashMap<String, String>,
+    rename: Option<(String, String)>,
+    rename_error: Option<String>,
+    /// Feature evidence for the swap card, per library load and measure.
+    features_cache: Option<(usize, Measure, Arc<Vec<designs::Feature>>)>,
 }
 
 /// Graph options (kept for the session).
@@ -195,6 +203,11 @@ impl Lab {
             future: 0,
             needs_copy: (0, Default::default()),
             chart: ChartOpts::default(),
+            rewards_all: false,
+            name_drafts: Default::default(),
+            rename: None,
+            rename_error: None,
+            features_cache: None,
         };
         lab.rescan(false);
         lab
@@ -219,6 +232,9 @@ impl Lab {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if let Some((key, name)) = self.rename.take() {
+            self.apply_rename(&key, &name);
+        }
         if let Some(rx) = &self.loading {
             match rx.try_recv() {
                 Ok(lib) => {
@@ -930,10 +946,11 @@ impl Lab {
         });
         ui.label(
             RichText::new(format!(
-                "A change is clear only if its effect beats {:.1}, the level that random points inside unchanged runs reach 5% of the time ({} points{}).",
+                "A change is clear only if its effect beats {:.1}, the level that random points inside unchanged runs reach 5% of the time ({} points{}). Reward changes are judged on lap time instead, against {:.1}.",
                 lib.threshold,
                 lib.placebo_points,
-                if lib.placebo_points < verdict::MIN_PLACEBO { ", too few to calibrate, so a default is used" } else { "" }
+                if lib.placebo_points < verdict::MIN_PLACEBO { ", too few to calibrate, so a default is used" } else { "" },
+                lib.lap_threshold
             ))
             .small()
             .weak(),
@@ -1094,7 +1111,7 @@ impl Lab {
                                     Outcome::Helped => "▲ helped".to_string(),
                                     Outcome::Hurt => "▼ hurt".to_string(),
                                     Outcome::CantTell(verdict::Reason::TooShort(..)) => "too short".to_string(),
-                                    Outcome::CantTell(verdict::Reason::RewardsChanged) => "rewards changed".to_string(),
+                                    Outcome::CantTell(verdict::Reason::RewardsChanged) => "rewards changed, no laps to judge by".to_string(),
                                     Outcome::CantTell(verdict::Reason::TimeLimitChanged) => "time limit changed".to_string(),
                                     Outcome::CantTell(verdict::Reason::TrackChanged) => "track changed".to_string(),
                                     Outcome::CantTell(_) => format!("● can't tell (z {:+.1})", v.z.unwrap_or(0.0)),
@@ -1441,6 +1458,281 @@ impl Lab {
         });
     }
 
+    // ---------------------------------------------------------------- swap card
+
+    fn features_for(&mut self, lib: &Arc<Library>, m: Measure) -> Arc<Vec<designs::Feature>> {
+        let key = Arc::as_ptr(lib) as usize;
+        if let Some((k, mm, f)) = &self.features_cache {
+            if *k == key && *mm == m {
+                return f.clone();
+            }
+        }
+        let f = Arc::new(designs::features(lib, m));
+        self.features_cache = Some((key, m, f.clone()));
+        f
+    }
+
+    /// For each barely-used sensor, what the network-design evidence says about it and about the
+    /// sensors this network doesn't have.
+    fn swap_card(&mut self, ui: &mut egui::Ui, n: &Network, low: &[usize], usage: &[f64], even: f64) {
+        let Some(lib) = self.lib.clone() else { return };
+        let save = &n.save;
+        let m = if save.gens.iter().any(|g| g.best_lap.is_some()) { Measure::Lap } else { Measure::Rate };
+        let feats = self.features_for(&lib, m);
+        let stage = n.runs.last().and_then(|r| compare::stage_index(r.stage)).unwrap_or(0);
+        let mine: Vec<String> = save.arch.extras().iter().map(|t| format::sensor_name(t)).collect();
+        let inputs: Vec<&designs::Feature> = feats.iter().filter(|f| f.kind == "Input").collect();
+        ui.add_space(6.0);
+        egui::Frame::group(ui.style()).inner_margin(10.0).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new("Swap candidates for your next network").size(16.0).strong());
+            ui.label(
+                RichText::new(format!(
+                    "Networks with vs without each sensor at the {} stage, by {} gain per 10 gens (one median per network). Usage is estimated from weights, and with/without compares different networks (their tracks, settings and luck differ too), so read this as a shortlist to try, not a verdict.",
+                    STAGES[stage],
+                    m.unit()
+                ))
+                .small()
+                .weak(),
+            );
+            let extras = mine.len();
+            if extras < 7 {
+                ui.label(RichText::new(format!("This network uses {extras} of the 7 non-raycast sensors the game allows, so you could add one instead of swapping.")).small());
+            }
+            // one line of evidence for a feature at this stage
+            let evidence = |ui: &mut egui::Ui, f: Option<&designs::Feature>| match f.and_then(|f| f.evidence(stage).map(|e| (f, e))) {
+                Some((f, (pb, st, with_better))) => {
+                    let (w, wo) = &f.stages[stage];
+                    let (mw, mwo) = (runs::quantile(w, 0.5), runs::quantile(wo, 0.5));
+                    let even_odds = pb < 0.6;
+                    ui.horizontal(|ui| {
+                        badge_small(ui, st);
+                        ui.label(
+                            RichText::new(format!(
+                                "with {} ({} nets) vs without {} ({} nets) · {}",
+                                m.fmt(mw),
+                                w.len(),
+                                m.fmt(mwo),
+                                wo.len(),
+                                if even_odds {
+                                    "about even".to_string()
+                                } else {
+                                    format!("{} {:.0}% of the time", if with_better { "with beat without" } else { "without beat with" }, pb * 100.0)
+                                }
+                            ))
+                            .small()
+                            .color(if even_odds { NEUTRAL } else if with_better { HELPED } else { HURT }),
+                        );
+                    });
+                }
+                None => match f {
+                    Some(f) => {
+                        let (nw, nwo) = (f.stages[stage].0.len(), f.stages[stage].1.len());
+                        ui.label(RichText::new(format!("no evidence yet at this stage ({nw} networks with, {nwo} without; needs 2+ each)")).small().weak());
+                    }
+                    None => {
+                        ui.label(RichText::new("every network you've trained has it, so there's nothing to compare it with").small().weak());
+                    }
+                },
+            };
+            egui::Grid::new("swap_grid").spacing([12.0, 4.0]).show(ui, |ui| {
+                for &i in low {
+                    let name = netviz::input_name(save, i);
+                    ui.label(RichText::new(format!("{name} ({:.1}× usage)", usage[i] / even)).strong().color(LAP));
+                    evidence(ui, inputs.iter().copied().find(|f| f.name == name));
+                    ui.end_row();
+                }
+            });
+            // candidates: sensors this network doesn't have, best evidence first
+            let mut cands: Vec<(&designs::Feature, Option<(f64, Strength, bool)>)> =
+                inputs.iter().copied().filter(|f| !mine.contains(&f.name)).map(|f| (f, f.evidence(stage))).collect();
+            let rank = |e: &Option<(f64, Strength, bool)>| match e {
+                Some((pb, st, true)) if *pb >= 0.6 => (0, match st { Strength::Strong => 0, Strength::Some => 1, _ => 2 }, (-(pb * 1000.0)) as i64),
+                Some((pb, _, true)) => (1, 0, (-(pb * 1000.0)) as i64),
+                Some((pb, _, false)) => (2, 0, (pb * 1000.0) as i64),
+                None => (3, 0, 0),
+            };
+            cands.sort_by_key(|c| rank(&c.1));
+            ui.add_space(4.0);
+            if cands.is_empty() {
+                ui.label(RichText::new("Your networks between them haven't used any sensor this one lacks, so there's nothing to compare a swap with.").small().weak());
+                return;
+            }
+            ui.label(RichText::new("Sensors this network doesn't have").small().strong());
+            let thin = cands.iter().filter(|c| c.1.is_none()).count();
+            egui::Grid::new("swap_cands").striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
+                for (f, _) in cands.iter().filter(|c| c.1.is_some()).take(6) {
+                    ui.label(RichText::new(&f.name).strong());
+                    evidence(ui, Some(f));
+                    // other stages, compactly
+                    let other: Vec<String> = (0..STAGES.len())
+                        .filter(|&k| k != stage)
+                        .filter_map(|k| f.evidence(k).map(|(_, st, wb)| format!("{} {}{}", STAGES[k], if wb { "▲" } else { "▼" }, match st { Strength::Strong => "●●●", Strength::Some => "●●○", _ => "●○○" })))
+                        .collect();
+                    ui.label(RichText::new(if other.is_empty() { String::new() } else { other.join("  ") }).small().weak())
+                        .on_hover_text("Other stages: ▲ networks with it did better, ▼ without did better; dots = strength");
+                    ui.end_row();
+                }
+            });
+            if thin > 0 {
+                let names: Vec<&str> = cands.iter().filter(|c| c.1.is_none()).map(|c| c.0.name.as_str()).collect();
+                ui.label(RichText::new(format!("No evidence yet at this stage: {}.", names.join(", "))).small().weak());
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------- track names
+
+    /// Save a player's name for a track (empty = forget it) and show it straight away.
+    fn apply_rename(&mut self, key: &str, name: &str) {
+        let mut all = track_builder::lab::names::load();
+        let name = name.trim();
+        if name.is_empty() {
+            all.remove(key);
+        } else {
+            all.insert(key.to_string(), name.to_string());
+        }
+        match track_builder::lab::names::store(&all) {
+            Ok(()) => {
+                self.rename_error = None;
+                if let Some(lib) = &self.lib {
+                    let mut l = (**lib).clone();
+                    let folder = library::track_names(&l.dir);
+                    let mut names = folder;
+                    l.user_named = all.keys().cloned().collect();
+                    names.extend(all);
+                    l.track_names = names;
+                    self.lib = Some(Arc::new(l));
+                }
+                self.name_drafts.remove(key);
+            }
+            Err(e) => self.rename_error = Some(format!("Couldn't save the name: {e:#}")),
+        }
+    }
+
+    /// A name box for one track: shown for built-in tracks (unnamed, or named by the player).
+    fn name_box(&mut self, ui: &mut egui::Ui, lib: &Library, key: &str, width: f32) {
+        if key == runs::RANDOM_TRACK || key.chars().all(|c| c == '0' || c == '-') || (lib.track_names.contains_key(key) && !lib.user_named.contains(key)) {
+            return;
+        }
+        let current = if lib.user_named.contains(key) { lib.track_names.get(key).cloned().unwrap_or_default() } else { String::new() };
+        let draft = self.name_drafts.entry(key.to_string()).or_insert(current.clone());
+        let r = ui.add_sized([width, 20.0], egui::TextEdit::singleline(draft).hint_text("✎ name it"));
+        let changed = draft.trim() != current;
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if changed && (ui.small_button("Save").clicked() || enter) {
+            self.rename = Some((key.to_string(), draft.clone()));
+        }
+    }
+
+    // ---------------------------------------------------------------- reward setups
+
+    fn reward_setups_table(&mut self, ui: &mut egui::Ui, lib: &Library, track: Option<&str>, min_len: usize) {
+        let setups = overview::reward_setups(lib, track, min_len);
+        if setups.is_empty() {
+            return;
+        }
+        ui.label(RichText::new("Reward setups").size(17.0).strong());
+        ui.label(
+            RichText::new(
+                "Each combination of rewards you've switched on (weights ignored). Always judged on lap time, whatever the measure above, because the rewards set the score's scale. Hover a cell for details.",
+            )
+            .small()
+            .weak(),
+        );
+        let one_track = track.is_some();
+        egui::ScrollArea::horizontal().id_salt("reward_setups").show(ui, |ui| {
+            egui::Grid::new("reward_setups_grid").striped(true).spacing([14.0, 4.0]).show(ui, |ui| {
+                ui.label(RichText::new("Rewards on").small().strong());
+                for h in ["Runs", "Networks"] {
+                    ui.label(RichText::new(h).small().strong());
+                }
+                for st in STAGES {
+                    ui.label(RichText::new(capitalise(st)).small().strong()).on_hover_text("Median lap-time gain per 10 gens for runs starting at this stage (n = runs)");
+                }
+                ui.label(RichText::new("First lap").small().strong()).on_hover_text("Generations from starting a track to the first completed lap, for starts that mostly used this setup until then");
+                if one_track {
+                    ui.label(RichText::new("Fastest lap").small().strong());
+                }
+                ui.label(RichText::new("Switching to it").small().strong()).on_hover_text("Changes to this setup, judged before/after on lap time");
+                ui.end_row();
+                // best median per stage, to highlight
+                let best: Vec<Option<f64>> = (0..STAGES.len())
+                    .map(|k| setups.iter().filter(|s| s.gains[k].len() >= 3).filter_map(|s| s.median_gain(k)).reduce(f64::max))
+                    .collect();
+                let fastest_first = setups.iter().filter(|s| s.to_first_lap.len() >= 2).filter_map(|s| s.median_first_lap()).reduce(f64::min);
+                let shown: Vec<&overview::RewardSetup> =
+                    setups.iter().filter(|s| self.rewards_all || s.runs >= 3 || s.to_first_lap.len() + s.never_lapped >= 2).collect();
+                for s in shown {
+                    ui.label(RichText::new(&s.label).strong());
+                    ui.label(RichText::new(s.runs.to_string()).small());
+                    ui.label(RichText::new(s.networks.to_string()).small());
+                    for k in 0..STAGES.len() {
+                        match s.median_gain(k) {
+                            Some(g) => {
+                                let n = s.gains[k].len();
+                                let mut t = RichText::new(format!("{} ({n})", Measure::Lap.fmt(g))).small();
+                                t = if n < 3 { t.weak() } else if best[k] == Some(g) { t.color(HELPED).strong() } else if g > 0.0 { t } else { t.color(HURT) };
+                                ui.label(t).on_hover_text(format!(
+                                    "{} runs: middle half {} to {}{}",
+                                    n,
+                                    Measure::Lap.fmt(runs::quantile(&s.gains[k], 0.25)),
+                                    Measure::Lap.fmt(runs::quantile(&s.gains[k], 0.75)),
+                                    if n < 3 { " (under 3 runs: a guess at best)" } else { "" }
+                                ));
+                            }
+                            None => {
+                                ui.label(RichText::new("–").weak());
+                            }
+                        }
+                    }
+                    let reached = s.to_first_lap.len();
+                    match s.median_first_lap() {
+                        Some(m) => {
+                            let t = RichText::new(format!("{m:.0} gens ({reached}/{})", reached + s.never_lapped)).small();
+                            ui.label(if fastest_first == Some(m) { t.color(HELPED).strong() } else { t }).on_hover_text(format!(
+                                "Median over {reached} track starts that reached a lap{}. Sorted: {}",
+                                if s.never_lapped > 0 { format!("; {} more (20+ gens) never did", s.never_lapped) } else { String::new() },
+                                {
+                                    let mut v = s.to_first_lap.clone();
+                                    v.sort();
+                                    v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")
+                                }
+                            ));
+                        }
+                        None if s.never_lapped > 0 => {
+                            ui.label(RichText::new(format!("never (0/{})", s.never_lapped)).small().color(HURT));
+                        }
+                        None => {
+                            ui.label(RichText::new("–").weak());
+                        }
+                    }
+                    if one_track {
+                        ui.label(s.best_lap.as_ref().map_or(RichText::new("–").weak(), |(l, f, g)| RichText::new(format!("{l:.3} s · {f} @ {g}")).small().color(LAP)));
+                    }
+                    let (h, hu, j) = s.switched_to;
+                    ui.label(if j == 0 {
+                        RichText::new("–").weak()
+                    } else {
+                        RichText::new(format!("▲{h} ▼{hu} of {j}")).small().color(if h > hu { HELPED } else if hu > h { HURT } else { NEUTRAL })
+                    });
+                    ui.end_row();
+                }
+            });
+        });
+        let hidden = setups.iter().filter(|s| !(s.runs >= 3 || s.to_first_lap.len() + s.never_lapped >= 2)).count();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Green = best of the setups with 3+ runs at that stage, or the fastest to a first lap. Faint = under 3 runs.").small().weak());
+            if hidden > 0 {
+                let t = if self.rewards_all { "Hide rarely used setups".to_string() } else { format!("Show {hidden} rarely used setups") };
+                if ui.small_button(t).clicked() {
+                    self.rewards_all = !self.rewards_all;
+                }
+            }
+        });
+        ui.add_space(10.0);
+    }
+
     // ---------------------------------------------------------------- inside the network
 
     fn inside_network(&mut self, ui: &mut egui::Ui, n: &Network) {
@@ -1511,6 +1803,9 @@ impl Lab {
             );
         }
         ui.label(RichText::new("× = share of the outputs' attention compared with an even split across all inputs.").small().weak());
+        if !low.is_empty() {
+            self.swap_card(ui, n, &low, &usage, even);
+        }
 
         // still learning?
         ui.add_space(10.0);
@@ -1809,6 +2104,9 @@ impl Lab {
                     ui.selectable_value(&mut self.ov_track, Some(t.key.clone()), format!("{}  ·  {} runs · {} gens", t.name, t.runs, thousands(t.gens)));
                 }
             });
+            if let Some(key) = self.ov_track.clone() {
+                self.name_box(ui, lib, &key, 160.0);
+            }
             ui.separator();
             measure_picker(ui, &mut self.ov_measure);
             ui.separator();
@@ -1816,6 +2114,9 @@ impl Lab {
                 badge(ui, s);
             }
         });
+        if let Some(e) = &self.rename_error {
+            ui.colored_label(HURT, e);
+        }
         ui.add_space(6.0);
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             // pointer to the Now training tab
@@ -1835,8 +2136,9 @@ impl Lab {
             }
             // stage playbook
             let cards = overview::playbook(lib, self.ov_track.as_deref(), self.ov_measure, min_len);
-            ui.columns(STAGES.len(), |cols| {
-                for (c, ui) in cards.iter().zip(cols.iter_mut()) {
+            stage_grid(ui, cards.len(), |ui, k| {
+                let c = &cards[k];
+                {
                     egui::Frame::group(ui.style()).show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.horizontal(|ui| {
@@ -1902,6 +2204,7 @@ impl Lab {
                 }
             }
             let scope = self.ov_track.clone();
+            self.reward_setups_table(ui, lib, scope.as_deref(), min_len);
             let best = overview::best_stretches(lib, scope.as_deref(), self.ov_measure, min_len, 5);
             if !best.is_empty() {
                 ui.strong("Biggest gains");
@@ -1945,17 +2248,24 @@ impl Lab {
             if self.ov_track.is_none() {
                 ui.add_space(10.0);
                 ui.strong("Tracks");
-                ui.label(RichText::new("Click a track to see what worked there.").small().weak());
+                ui.label(
+                    RichText::new(
+                        "Click a track to see what worked there. Built-in tracks are packed inside the game, so a save only knows them by an id: type a name to label them (kept in the tool's own settings, not the game's folder). Until then, each shows the network that trained most on it, and hovering lists all of them.",
+                    )
+                    .small()
+                    .weak(),
+                );
                 egui::Grid::new("tracks").striped(true).spacing([14.0, 3.0]).show(ui, |ui| {
-                    for h in ["Track", "Gens", "Runs", "Fastest lap", "Set by", "Settings at the time"] {
+                    for h in ["Track", "Your name", "Gens", "Runs", "Fastest lap", "Set by", "Settings at the time"] {
                         ui.label(RichText::new(h).small().strong());
                     }
                     ui.end_row();
                     for t in &tracks {
                         let name = ui.add(egui::Label::new(RichText::new(&t.name).color(if t.named { Color32::from_gray(230) } else { Color32::from_gray(170) })).sense(Sense::click()));
-                        if name.on_hover_text(format!("Trained by {}", t.networks.join(", "))).clicked() {
+                        if name.on_hover_text(format!("Trained by {}\nId {}", t.networks.join(", "), t.key)).clicked() {
                             self.ov_track = Some(t.key.clone());
                         }
+                        ui.horizontal(|ui| self.name_box(ui, lib, &t.key, 130.0));
                         ui.label(RichText::new(thousands(t.gens)).small());
                         ui.label(RichText::new(t.runs.to_string()).small());
                         match &t.best_lap {
@@ -2000,8 +2310,9 @@ impl Lab {
             // design picks per stage
             let cards = overview::playbook(lib, None, m, 10);
             ui.label(RichText::new("Which designs learned fastest, by stage").size(17.0).strong());
-            ui.columns(STAGES.len(), |cols| {
-                for (c, ui) in cards.iter().zip(cols.iter_mut()) {
+            stage_grid(ui, cards.len(), |ui, k| {
+                let c = &cards[k];
+                {
                     egui::Frame::group(ui.style()).show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.heading(capitalise(STAGES[c.stage]));
@@ -2193,8 +2504,8 @@ impl Lab {
             let p = compare::pooled_verdicts(lib, &self.filters);
             ui.label(
                 RichText::new(format!(
-                    "Threshold |z| > {:.1}, from {} placebo points: by construction about 5% of testable changes look clear by chance, so compare each count with the ≈ figure. Changes are usually made when a run has flattened, so read these as \"associated with\", not \"caused\".",
-                    lib.threshold, lib.placebo_points
+                    "Threshold |z| > {:.1}, from {} placebo points (reward changes: judged on lap time, |z| > {:.1} from {} points): by construction about 5% of testable changes look clear by chance, so compare each count with the ≈ figure. Changes are usually made when a run has flattened, so read these as \"associated with\", not \"caused\".",
+                    lib.threshold, lib.placebo_points, lib.lap_threshold, lib.lap_placebo_points
                 ))
                 .small()
                 .weak(),
@@ -2358,8 +2669,14 @@ fn verdict_tooltip(ui: &mut egui::Ui, v: &Verdict, lib: &Library) {
     ui.strong(format!("Gen {}: {}", v.at, if v.change.is_empty() { "settings changed" } else { &v.change }));
     ui.colored_label(c, v.label());
     if let (Some(b), Some(a), Some(z)) = (v.before, v.after, v.z) {
-        ui.label(format!("Median slope {:+.3} → {:+.3} per gen", b.slope, a.slope));
-        ui.label(format!("z = {z:+.1} (clear above ±{:.1}) · {} gens before, {} after", lib.threshold, v.n_before, v.n_after));
+        if v.by_lap {
+            ui.label(RichText::new("Judged on lap time: the rewards set the score's scale, but a lap time means the same whatever the rewards.").small());
+            ui.label(format!("Best lap trend {:+.4} → {:+.4} s per gen (negative = getting faster)", b.slope, a.slope));
+            ui.label(format!("z = {z:+.1} (clear above ±{:.1}, lap-time calibration) · {} gens before, {} after", lib.lap_threshold, v.n_before, v.n_after));
+        } else {
+            ui.label(format!("Median slope {:+.3} → {:+.3} per gen", b.slope, a.slope));
+            ui.label(format!("z = {z:+.1} (clear above ±{:.1}) · {} gens before, {} after", lib.threshold, v.n_before, v.n_after));
+        }
     }
     if let Some(l) = v.lap_change {
         ui.label(format!("Best lap {} {:.3} s (lap time always falls over time, so read with care)", if l < 0.0 { "faster by" } else { "slower by" }, l.abs()));
@@ -2475,6 +2792,21 @@ fn badge(ui: &mut egui::Ui, s: Strength) {
 }
 
 /// The rows of a stage card: one per setting, best value first, with its evidence.
+/// Lay out stage cards in as many columns as fit (4 across on a wide window, else 2×2 or a
+/// single column), so their contents never run into the next card.
+fn stage_grid(ui: &mut egui::Ui, n: usize, mut card: impl FnMut(&mut egui::Ui, usize)) {
+    let per = ((ui.available_width() / 420.0).floor() as usize).clamp(1, 4);
+    let per = if per == 3 { 2 } else { per }; // 3 + 1 looks lopsided
+    for row in (0..n).collect::<Vec<_>>().chunks(per) {
+        ui.columns(per, |cols| {
+            for (&k, ui) in row.iter().zip(cols.iter_mut()) {
+                card(ui, k);
+            }
+        });
+        ui.add_space(4.0);
+    }
+}
+
 fn stage_card_body(ui: &mut egui::Ui, c: &overview::StageCard, m: Measure) {
     if let Some(best) = c.flat {
         ui.label(
@@ -2505,13 +2837,17 @@ fn stage_card_body(ui: &mut egui::Ui, c: &overview::StageCard, m: Measure) {
 }
 
 fn stage_rows(ui: &mut egui::Ui, c: &overview::StageCard, picks: &[&overview::Pick], m: Measure, design: bool) {
+    let value_w = (ui.available_width() - 210.0).max(80.0);
     egui::Grid::new(("card", c.stage, c.runs, design)).spacing([8.0, 3.0]).show(ui, |ui| {
         for p in picks {
             ui.label(RichText::new(p.dimension).small().weak());
-            ui.label(RichText::new(&p.best.label).strong());
+            ui.scope(|ui| {
+                ui.set_max_width(value_w);
+                ui.add(egui::Label::new(RichText::new(&p.best.label).strong()).wrap());
+            });
             let g = p.best.median();
             ui.label(RichText::new(m.fmt(g)).small().color(if g > 0.0 { HELPED } else { HURT }));
-            let r = ui.horizontal(|ui| badge(ui, p.strength)).response;
+            let r = ui.horizontal(|ui| badge_small(ui, p.strength)).response;
             r.on_hover_ui(|ui| {
                 ui.strong(format!("{}: median {} gain per 10 gens", p.dimension, m.unit()));
                 for ch in &p.all {

@@ -143,6 +143,17 @@ fn lab_never_writes_files() {
             assert!(src.contains("refusing to write"), "keeper must check the destination name");
             continue;
         }
+        // track names: one settings file in the tool's own folder, never the game's
+        if f.file_name().is_some_and(|n| n == "names.rs") {
+            assert_eq!(src.matches("std::fs::write(").count(), 1);
+            assert_eq!(src.matches("std::fs::rename(").count(), 1);
+            assert_eq!(src.matches("create_dir_all(").count(), 1);
+            for b in ["remove_file", "remove_dir", "fs::copy", "OpenOptions", "File::create"] {
+                assert!(!src.contains(b), "names.rs contains `{b}`");
+            }
+            assert!(src.contains("refusing to write inside the game folder"));
+            continue;
+        }
         for b in banned {
             assert!(!src.contains(b), "{} contains `{b}`", f.display());
         }
@@ -337,4 +348,69 @@ fn still_learning_diagnosis() {
         assert_eq!(netviz::diagnose(&l, 0) == Diagnosis::Learning || netviz::diagnose(&l, 0) == Diagnosis::FineTuning, true);
         assert!(matches!(netviz::diagnose(&l, 1000), Diagnosis::Drifting | Diagnosis::Stuck));
     }
+}
+
+#[test]
+fn reward_changes_are_judged_on_lap_time() {
+    use track_builder::lab::verdict::{Outcome, Reason};
+    let dir = std::env::var("LAB_SAVES").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/evolution").to_string());
+    let lib = library::scan(Path::new(&dir), None, verdict::WINDOW, verdict::MIN_SIDE);
+    assert!(lib.lap_threshold > 1.0);
+    let (mut judged, mut no_laps, mut short) = (0, 0, 0);
+    for n in &lib.networks {
+        for v in n.verdicts.iter().filter(|v| v.at >= n.fork.own_from) {
+            let rewards = n.runs[v.run - 1].rewards != n.runs[v.run].rewards && n.runs[v.run - 1].track == n.runs[v.run].track;
+            // only reward changes (on the same track) are judged by lap
+            assert_eq!(v.by_lap, rewards && v.z.is_some(), "{} gen {}", n.file, v.at);
+            if rewards {
+                match &v.outcome {
+                    Outcome::CantTell(Reason::RewardsChanged) => no_laps += 1,
+                    Outcome::CantTell(Reason::TooShort(..)) => short += 1,
+                    _ => {
+                        judged += 1;
+                        if std::env::var("LAB_SAVES").is_ok() {
+                            eprintln!("  {} gen {}: {} ({:+.1})", n.file, v.at, v.label(), v.z.unwrap_or(0.0));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("reward changes: {judged} judged on lap time, {no_laps} without laps, {short} too short; lap threshold {:.2}", lib.lap_threshold);
+}
+
+#[test]
+fn reward_setups_add_up() {
+    use track_builder::lab::overview;
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/evolution");
+    let lib = library::scan(Path::new(dir), None, verdict::WINDOW, verdict::MIN_SIDE);
+    let setups = overview::reward_setups(&lib, None, 10);
+    let f = compare::Filters { min_len: 10, measure: compare::Measure::Lap, ..compare::Filters::default() };
+    let runs = compare::counted_runs(&lib, &f).filter(|(_, r)| !r.rewards.is_empty()).count();
+    assert_eq!(setups.iter().map(|s| s.runs).sum::<usize>(), runs);
+    for s in &setups {
+        assert!(s.networks <= s.runs.max(1) || s.runs == 0);
+        assert!(s.switched_to.0 + s.switched_to.1 <= s.switched_to.2);
+    }
+    // labels are unique
+    let mut labels: Vec<&str> = setups.iter().map(|s| s.label.as_str()).collect();
+    labels.sort();
+    labels.dedup();
+    assert_eq!(labels.len(), setups.len());
+}
+
+#[test]
+fn track_names_round_trip_and_stay_out_of_the_game_folder() {
+    use track_builder::lab::names;
+    let dir = std::env::temp_dir().join(format!("tb-names-{}", std::process::id()));
+    let p = dir.join("track-names.json");
+    let mut m = std::collections::HashMap::new();
+    m.insert("c75c00e2-cf27-4848-a6f0-f71a275d9f55".to_string(), "  Monza  ".to_string());
+    m.insert("blank".to_string(), " ".to_string());
+    names::save_to(&p, &m).unwrap();
+    let back = names::load_from(&p);
+    assert_eq!(back.len(), 1);
+    assert_eq!(back["c75c00e2-cf27-4848-a6f0-f71a275d9f55"], "Monza");
+    assert!(names::save_to(&dir.join("AI Learns To Drive").join("x.json"), &m).is_err());
+    std::fs::remove_dir_all(&dir).ok();
 }

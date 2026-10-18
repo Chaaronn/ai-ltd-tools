@@ -317,7 +317,10 @@ pub fn track_name(lib: &Library, key: &str) -> (String, bool) {
     }
     match lib.track_names.get(key) {
         Some(n) => (n.clone(), true),
-        None => (format!("Built-in track {}", &key[..key.len().min(8)]), false),
+        None => match lib.track_hints.get(key) {
+            Some(net) => (format!("Built-in {} · {net}'s track", &key[..key.len().min(8)]), false),
+            None => (format!("Built-in track {}", &key[..key.len().min(8)]), false),
+        },
     }
 }
 
@@ -586,4 +589,130 @@ mod tests {
         assert_eq!(strength(3, Some(3), Some(0.9)), Strength::Weak);
         assert_eq!(strength(20, None, None), Strength::Weak);
     }
+}
+
+/// One combination of rewards (which metrics are on; weights ignored) across the library.
+#[derive(Clone, Debug)]
+pub struct RewardSetup {
+    pub label: String,
+    /// Runs (own history, 10+ gens) and networks that used it.
+    pub runs: usize,
+    pub networks: usize,
+    pub gens: usize,
+    /// Lap-time gain per 10 gens, per stage: the runs' gains (sorted).
+    pub gains: [Vec<f64>; compare::NSTAGES],
+    /// Fastest lap with this setup (only meaningful on one track): (seconds, network, gen).
+    pub best_lap: Option<(f64, String, usize)>,
+    /// Generations from starting a track to its first lap, for (network, track) starts that
+    /// mostly used this setup before the first lap.
+    pub to_first_lap: Vec<usize>,
+    /// Starts that mostly used this setup and never reached a lap (with at least 20 gens).
+    pub never_lapped: usize,
+    /// Switching to this setup, judged on lap time: (helped, hurt, judged).
+    pub switched_to: (usize, usize, usize),
+}
+
+impl RewardSetup {
+    pub fn median_gain(&self, stage: usize) -> Option<f64> {
+        (!self.gains[stage].is_empty()).then(|| runs::quantile(&self.gains[stage], 0.5))
+    }
+    pub fn median_first_lap(&self) -> Option<f64> {
+        let mut v: Vec<f64> = self.to_first_lap.iter().map(|&x| x as f64).collect();
+        runs::median(&mut v)
+    }
+}
+
+/// Every reward setup used, most-used first. `track` limits it to one track key.
+pub fn reward_setups(lib: &Library, track: Option<&str>, min_len: usize) -> Vec<RewardSetup> {
+    let mut out: BTreeMap<String, RewardSetup> = BTreeMap::new();
+    let mut nets: BTreeMap<String, std::collections::HashSet<String>> = BTreeMap::new();
+    let new = |label: &str| RewardSetup {
+        label: label.to_string(),
+        runs: 0,
+        networks: 0,
+        gens: 0,
+        gains: Default::default(),
+        best_lap: None,
+        to_first_lap: Vec::new(),
+        never_lapped: 0,
+        switched_to: (0, 0, 0),
+    };
+    let f = Filters { min_len, measure: Measure::Lap, ..Filters::default() };
+    for (n, r) in compare::counted_runs(lib, &f).filter(|(_, r)| track.is_none_or(|t| r.track == t)) {
+        if r.rewards.is_empty() {
+            continue;
+        }
+        let key = rewards_key(&r.rewards);
+        let e = out.entry(key.clone()).or_insert_with(|| new(&key));
+        e.runs += 1;
+        e.gens += r.len();
+        nets.entry(key).or_default().insert(n.file.clone());
+        if let (Some(s), Some(g)) = (compare::stage_index(r.stage), f.gain(r)) {
+            e.gains[s].push(g);
+        }
+        if track.is_some() {
+            if let Some((i, l)) = n.save.gens[r.start..r.end].iter().enumerate().filter_map(|(i, g)| g.best_lap.map(|l| (i, l))).min_by(|a, b| a.1.total_cmp(&b.1)) {
+                if e.best_lap.as_ref().is_none_or(|b| l < b.0) {
+                    e.best_lap = Some((l, n.file.clone(), r.start + i));
+                }
+            }
+        }
+    }
+    // generations to a first lap, per (network, track) start inside the network's own history
+    for n in lib.networks.iter().filter(|n| !super::keeper::is_keeper_copy(&n.file)) {
+        let g = &n.save.gens;
+        let keys = runs::track_keys(g);
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (start, k) in keys.iter().enumerate() {
+            if !seen.insert(k.as_str()) || start < n.fork.own_from || track.is_some_and(|t| t != k) {
+                continue;
+            }
+            let on_track: Vec<usize> = (start..g.len()).filter(|&i| keys[i] == *k).collect();
+            let first = on_track.iter().position(|&i| g[i].best_lap.is_some());
+            let before: &[usize] = match first {
+                Some(p) => &on_track[..p.max(1)],
+                None if on_track.len() >= 20 => &on_track,
+                None => continue,
+            };
+            // the setup used for most of the generations before the first lap
+            let mut count: HashMap<String, usize> = HashMap::new();
+            for &i in before {
+                let r = n.runs.iter().find(|r| i >= r.start && i < r.end);
+                if let Some(r) = r.filter(|r| !r.rewards.is_empty()) {
+                    *count.entry(rewards_key(&r.rewards)).or_default() += 1;
+                }
+            }
+            let Some((key, _)) = count.into_iter().max_by_key(|x| x.1) else { continue };
+            let e = out.entry(key.clone()).or_insert_with(|| new(&key));
+            match first {
+                Some(p) => e.to_first_lap.push(p),
+                None => e.never_lapped += 1,
+            }
+        }
+        // reward switches judged on lap time
+        for v in n.verdicts.iter().filter(|v| v.by_lap && v.at >= n.fork.own_from) {
+            let r = &n.runs[v.run];
+            if track.is_some_and(|t| r.track != t) {
+                continue;
+            }
+            let e = out.entry(rewards_key(&r.rewards)).or_insert_with(|| new(&rewards_key(&r.rewards)));
+            e.switched_to.2 += 1;
+            match v.outcome {
+                super::verdict::Outcome::Helped => e.switched_to.0 += 1,
+                super::verdict::Outcome::Hurt => e.switched_to.1 += 1,
+                _ => {}
+            }
+        }
+    }
+    let mut v: Vec<RewardSetup> = out
+        .into_values()
+        .map(|mut s| {
+            s.networks = nets.get(&s.label).map_or(0, |x| x.len());
+            s.gains.iter_mut().for_each(|g| g.sort_by(f64::total_cmp));
+            s
+        })
+        .filter(|s| s.runs > 0 || !s.to_first_lap.is_empty() || s.never_lapped > 0)
+        .collect();
+    v.sort_by(|a, b| b.runs.cmp(&a.runs).then(b.gens.cmp(&a.gens)));
+    v
 }

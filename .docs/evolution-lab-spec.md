@@ -224,6 +224,9 @@ Players asked for a summary of what has worked best, not just the evidence. Buil
 | O-12 | **Stage by generations trained** (early < 200, mid < 1,000, late < 5,000, veteran after) and **time-limit aware** comparisons. | A new network is early; raising the time limit never makes it look more trained or create a fake gain; verdict windows stop at time-limit changes. |
 | O-13 | **Inside the network:** sensor and network views with estimated input usage, and "still learning?" from weight changes between snapshots. | Below the chart on Now training; usage labelled as an estimate; stopped below 0.5% change per 10 gens. |
 | O-14 | **Still learning, expanded:** a Learning / Fine-tuning / Drifting / Stuck diagnosis with advice, snapshot table, input usage over time, per-output change and idle neurons. | Drifting at low mutation doesn't advise lowering it; best lap in the table never gets slower; tested on the fixtures. |
+| O-15 | **Rewards:** reward changes judged on lap time (own placebo threshold); a reward setups table (gain by stage, generations to first lap, fastest lap, switch verdicts). | A reward change with laps both sides gets a verdict; setups' run counts add up to the counted runs; tested. |
+| O-16 | **Track names:** hint unnamed built-in tracks by their main network; let the player name them (saved in the tool's own settings). | Never writes in the game folder; names round-trip; tested. |
+| O-17 | **Swap card:** for barely-used sensors, replacement candidates from the with/without design evidence at the current stage. | Shows n and strength; "about even" and "no evidence yet" when thin; caveats visible. |
 | O-6 | **Lap-based stage and stall** (stage superseded by O-12) where laps exist. | A reward tweak no longer makes a well-trained network look early, and a falling lap time isn't called a stall. |
 
 ### P2: future

@@ -1,0 +1,9 @@
+# Track Builder / AI LTD tools — agent preferences
+
+## Compound Engineering artifacts
+CE ideation, brainstorm, and plan docs live under `.docs/` (not `docs/`):
+- `.docs/ideation/` — `/ce-ideate`
+- `.docs/brainstorms/` — `/ce-brainstorm`
+- `.docs/plans/` — `/ce-plan`
+
+`docs_root` is set to `.docs` in `.compound-engineering/config.yaml`. Do not write CE artifacts under `docs/`.

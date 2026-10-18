@@ -51,10 +51,18 @@ pub struct Library {
     pub networks: Vec<Arc<Network>>,
     pub threshold: f64,
     pub placebo_points: usize,
+    /// The same for verdicts judged on lap time (reward changes).
+    pub lap_threshold: f64,
+    pub lap_placebo_points: usize,
     pub window: usize,
     pub min_side: usize,
-    /// Track `Id` -> name, from the game's track folders (built-in tracks aren't readable).
+    /// Track `Id` -> name, from the game's track folders (built-in tracks aren't readable),
+    /// overlaid with the names the player gave in the Lab (`names`).
     pub track_names: HashMap<String, String>,
+    /// Ids the player named (a subset of `track_names`).
+    pub user_named: std::collections::HashSet<String>,
+    /// Track `Id` -> the network with most of its own generations there (a hint for unnamed tracks).
+    pub track_hints: HashMap<String, String>,
 }
 
 impl Library {
@@ -124,10 +132,11 @@ pub fn scan(dir: &Path, previous: Option<&Library>, window: usize, min_side: usi
         }
     }
     let mut lib = analyse(dir, loaded, window, min_side);
-    lib.track_names = match previous {
-        Some(p) if !p.track_names.is_empty() => p.track_names.clone(),
-        _ => track_names(dir),
-    };
+    let mut names = track_names(dir);
+    let user = super::names::load();
+    lib.user_named = user.keys().cloned().collect();
+    names.extend(user);
+    lib.track_names = names;
     lib
 }
 
@@ -209,16 +218,43 @@ pub fn analyse(dir: &Path, loaded: Vec<(PathBuf, String, f64, Arc<Save>, Option<
     let placebo: Vec<f64> =
         nets.iter().flat_map(|n| verdict::placebo_z(&n.save.gens, &n.runs, n.fork.own_from, window, min_side)).collect();
     let (threshold, placebo_points) = verdict::threshold(placebo);
+    let lap_placebo: Vec<f64> =
+        nets.iter().flat_map(|n| verdict::placebo_z_lap(&n.save.gens, &n.runs, n.fork.own_from, window, min_side)).collect();
+    let (lap_threshold, lap_placebo_points) = verdict::threshold(lap_placebo);
+    // the network that trained most on each track (own history), as a hint for unnamed tracks
+    let mut most: HashMap<String, (String, usize)> = HashMap::new();
+    for n in &nets {
+        if super::keeper::is_keeper_copy(&n.file) {
+            continue;
+        }
+        let mut per: HashMap<&str, usize> = HashMap::new();
+        for g in n.save.gens.iter().skip(n.fork.own_from) {
+            if let Some(t) = g.track.as_deref() {
+                *per.entry(t).or_default() += 1;
+            }
+        }
+        for (t, c) in per {
+            let e = most.entry(t.to_string()).or_insert((n.file.clone(), 0));
+            if c > e.1 {
+                *e = (n.file.clone(), c);
+            }
+        }
+    }
+    let track_hints: HashMap<String, String> = most.into_iter().map(|(k, v)| (k, v.0)).collect();
     for n in &mut nets {
-        n.verdicts = verdict::verdicts(&n.save.gens, &n.runs, threshold, window, min_side);
+        n.verdicts = verdict::verdicts(&n.save.gens, &n.runs, threshold, lap_threshold, window, min_side);
     }
     Library {
         dir: dir.to_path_buf(),
         networks: nets.into_iter().map(Arc::new).collect(),
         threshold,
         placebo_points,
+        lap_threshold,
+        lap_placebo_points,
         window,
         min_side,
         track_names: HashMap::new(),
+        user_named: Default::default(),
+        track_hints,
     }
 }

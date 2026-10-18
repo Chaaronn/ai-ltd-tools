@@ -1,0 +1,4 @@
+# Compound Engineering — repo config
+# docs_root is config.yaml only (not config.local.yaml).
+
+docs_root: .docs

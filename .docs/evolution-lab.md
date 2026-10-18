@@ -302,6 +302,23 @@ Shown on Now training below the chart. The save holds the network's weights and 
 
 ## GUI notes
 
+- **Track names.** The game's built-in tracks are packed inside the game's `.pck`, which is encrypted, so a save
+  only knows them by `TrackId` (the game's settings, challenge and log files don't name them either). Unnamed
+  tracks now show the network that trained most on them ("Built-in c75c00e2 · Type 2's track"; hover for all
+  networks and the full id). The Tracks table (and the box next to the track picker) lets the player type a name.
+  Names are saved by `lab::names` to `%APPDATA%\Cat's AI Ltd Tools\track-names.json` (a temp file then a rename),
+  the Lab's second fenced write: it refuses any path inside a folder called "AI Learns To Drive", and the source
+  test checks it has exactly one write, one rename and one create_dir_all. Player names override names from track
+  files; clearing the box forgets the name.
+- **Swap card** (Now training, under the usage bars, when a non-raycast sensor is under 0.6× an even share): for
+  each flagged sensor, the networks-with vs networks-without evidence at the network's current stage; then the
+  sensors this network doesn't have, best evidence first (with-better and at least 60% "beats", then about even,
+  then without-better), with n per side, strength dots, and a compact ▲/▼ for the other stages. "About even" when
+  the beat rate is under 60%; "no evidence yet" under 2 networks a side; "every network you've trained has it" when
+  there's nothing to compare. Judged on lap time if the network has laps, else score per second. Notes how many of
+  the game's 7 non-raycast sensor slots are used (room to add rather than swap). The weight-estimate and
+  confounding caveats stay on the card.
+
 - **Graph options** (⚙ menu by each timeline, kept for the session): toggle run bands, stalls, verdict markers,
   time-limit and reward-change markers, best line, middle-50% band, lap milestones, projection/target, fork point
   and the survival/spread strips; rolling-median smoothing (off/5/10/25/50 gens); chart height; quick ranges (last
@@ -310,6 +327,19 @@ Shown on Now training below the chart. The save holds the network's weights and 
   reward history with the best lap under each setup. Reward changes are marked ★ on the charts. The overview's
   playbook compares reward setups (which metrics are on, weights ignored) by lap time only, since rewards rescale
   the score.
+- **Reward changes get verdicts on lap time.** A reward change used to be "can't tell" because the rewards set the
+  score's scale. A lap time means the same whatever the rewards, so a change of rewards (same track) is now judged
+  on the best-lap series: slope before vs after, z positive when laps get faster more quickly, against its own
+  placebo threshold (best-lap series inside unchanged runs; 5.07 from 181 points on the current library, vs 3.84
+  for scores). Lap windows don't stop at time-limit changes. Each side needs 10+ generations, 80% of them with a lap
+  (gaps filled with the previous lap); otherwise "rewards changed, no laps to judge by". On the current saves: 9
+  reward changes judged (1 clearly hurt), 8 without laps, 186 too short: most reward changes come within 10
+  generations of the previous change.
+- **Reward setups table** (What's worked best, under the stage cards): one row per combination of rewards (weights
+  ignored): runs, networks, median lap gain per 10 gens at each stage, generations from starting a track to its
+  first lap (for starts that mostly used that setup until then; "reached/total", with starts of 20+ gens that never
+  lapped counted), the fastest lap with it (one track only), and the lap-time verdicts for switching to it. Setups
+  with under 3 runs and under 2 track starts are hidden behind a button.
 
 - The library is scanned on a background thread. Every 5 s the UI thread lists the folder's mtimes (cheap); if any
   changed, a new scan re-parses only those files. If a read fails (the game mid-save), the last good copy stays on
@@ -333,3 +363,28 @@ Set `LAB_SAVES` to a folder to also check a whole library:
 `LAB_SAVES="%APPDATA%\AI Learns To Drive\evolution" cargo test --test lab -- --nocapture`.
 Unit tests in `forks.rs` and `verdict.rs` cover fork families, siblings, slope recovery and a clear synthetic
 change.
+
+## Analysis: can "switching to rewards X at this stage" be suggested? (Oct 2026)
+
+One-off analysis of the 33 saves (not part of the app). Question: after a reward switch, does lap-time progress
+change, compared with ordinary points in training with no reward change nearby (placebo, same stage)?
+
+- 203 reward switches on the same track in own history. Setups are held a median of **7 generations**; 90 of 214
+  lasted under 5.
+- Only **47** switches have laps on both sides (5+ lap gens before, 10+ after). Of those, **26** had a time-limit
+  change within ±5 gens and 8 changed other settings at the same time. 20 of the 47 are one network (Faster again 3),
+  often 3 to 5 switches inside 10 generations (e.g. gens 987–996), so their effects can't be separated.
+- **6 clean switches** (no time-limit or settings change nearby, held 10+ gens, no other reward change within 10).
+  Nothing can be concluded per metric from 6.
+- Per metric, nothing is consistent. Weak hints only: adding Best lap (9 switches, 6 networks) sat slightly above
+  typical (slope percentile median 77, best lap over the next 50 gens percentile 74); removing Score (7 switches,
+  4 networks) sat below typical on slope in all 7 (percentile median 13). Adding Speed (avg) disagreed between the
+  two measures.
+- Time-limit raises almost never happen alone (1 with nothing else changing within 10 gens), so whether a longer
+  limit itself speeds up best laps (more laps per car, more chances) can't be checked yet.
+- The early stage has almost no laps (5 placebo points), so early-stage reward advice would have to use score per
+  second or generations to a first lap instead.
+
+Decision: don't build the suggestion yet. It would mostly be reporting noise and time-limit effects. What would
+make it possible: holding a reward setup (and the time limit) for 10+ generations after a change. Re-run when there
+are 30+ clean switches.

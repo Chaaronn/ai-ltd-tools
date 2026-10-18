@@ -261,6 +261,7 @@ fn lab(args: &[String]) -> Result<()> {
         return Ok(());
     }
     println!("{}: {} saves, placebo threshold |z| > {:.2} from {} points (window {window})", dir.display(), lib.networks.len(), lib.threshold, lib.placebo_points);
+    println!("  reward changes judged on lap time: |z| > {:.2} from {} points", lib.lap_threshold, lib.lap_placebo_points);
     for n in &lib.networks {
         let fork = n.fork.parent.map(|(p, k)| format!(" (fork of {} at {k})", lib.networks[p].file)).unwrap_or_default();
         let clear: Vec<String> = n

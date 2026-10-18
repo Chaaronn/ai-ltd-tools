@@ -86,6 +86,9 @@ pub struct Verdict {
     pub stage: Option<f64>,
     /// Median best-lap change (seconds, negative = faster), when both sides have laps.
     pub lap_change: Option<f64>,
+    /// Judged on lap time instead of score (reward changes: the rewards set the score's scale,
+    /// but a lap time means the same whatever the rewards). z is then positive for faster laps.
+    pub by_lap: bool,
 }
 
 impl Verdict {
@@ -112,7 +115,7 @@ pub fn reason_text(r: &Reason) -> String {
                 format!("only {a} gens after (need {need})")
             }
         }
-        Reason::RewardsChanged => "rewards changed too, so scores aren't comparable".into(),
+        Reason::RewardsChanged => "rewards changed, and there aren't laps on both sides to judge it by lap time (scores aren't comparable)".into(),
         Reason::TimeLimitChanged => "the time limit changed within the window, so scores aren't comparable".into(),
         Reason::TrackChanged => "track changed too".into(),
         Reason::MissingScores => "scores missing".into(),
@@ -200,6 +203,31 @@ fn limit_changes(limits: &[Option<f64>], lo: usize, hi: usize) -> bool {
     limits[lo..hi].windows(2).any(|w| w[0].is_some() && w[1].is_some() && w[0] != w[1])
 }
 
+/// Best lap per generation, gaps filled with the previous lap. None unless at least `min`
+/// generations, and 80% of them, have a lap.
+pub fn lap_series(g: &[Gen], min: usize) -> Option<Vec<f64>> {
+    let have = g.iter().filter(|x| x.best_lap.is_some()).count();
+    if have < min.max(3) || (have as f64) < 0.8 * g.len() as f64 {
+        return None;
+    }
+    let mut prev = g.iter().find_map(|x| x.best_lap)?;
+    Some(
+        g.iter()
+            .map(|x| {
+                if let Some(l) = x.best_lap {
+                    prev = l;
+                }
+                prev
+            })
+            .collect(),
+    )
+}
+
+/// Slope change judged on lap time: z is positive when laps get faster more quickly after.
+pub fn lap_slope_change(before: &[f64], after: &[f64]) -> Option<(Fit, Fit, f64)> {
+    slope_change(before, after).map(|(b, a, z)| (b, a, -z))
+}
+
 fn lap_median(g: &[Gen]) -> Option<f64> {
     let mut v: Vec<f64> = g.iter().filter_map(|x| x.best_lap).collect();
     if v.len() < 5 {
@@ -209,7 +237,8 @@ fn lap_median(g: &[Gen]) -> Option<f64> {
 }
 
 /// A verdict for every change between consecutive runs.
-pub fn verdicts(gens: &[Gen], runs: &[Run], threshold: f64, window: usize, min_side: usize) -> Vec<Verdict> {
+/// `lap_threshold` is used for changes judged on lap time (reward changes).
+pub fn verdicts(gens: &[Gen], runs: &[Run], threshold: f64, lap_threshold: f64, window: usize, min_side: usize) -> Vec<Verdict> {
     let limits = time_limits(gens);
     let mut out = Vec::new();
     for j in 1..runs.len() {
@@ -221,8 +250,10 @@ pub fn verdicts(gens: &[Gen], runs: &[Run], threshold: f64, window: usize, min_s
             change = if change.is_empty() { "network design".into() } else { format!("{change}, network design") };
             kind = if kind == "other" { "network design" } else { "several" };
         }
-        if rewards_changed || track_changed {
+        if track_changed {
             kind = "rewards/track";
+        } else if rewards_changed {
+            kind = if change.is_empty() { "rewards" } else { "several" };
         }
         if rewards_changed {
             change = if change.is_empty() { "rewards".into() } else { format!("{change}, rewards") };
@@ -232,6 +263,8 @@ pub fn verdicts(gens: &[Gen], runs: &[Run], threshold: f64, window: usize, min_s
         }
         let mut lo = a.end.saturating_sub(window).max(a.start);
         let mut hi = (b.start + window).min(b.end);
+        // lap-time windows don't stop at time-limit changes: a lap time doesn't depend on the limit
+        let (lap_lo, lap_hi) = (lo, hi);
         // stop each side at a change of time limit, so both sides are on the same footing
         while lo + 1 < a.end && limits[lo].is_some() && limits[a.end - 1].is_some() && limits[lo] != limits[a.end - 1] {
             lo += 1;
@@ -254,11 +287,40 @@ pub fn verdicts(gens: &[Gen], runs: &[Run], threshold: f64, window: usize, min_s
             n_after: na,
             stage: a.stage,
             lap_change: None,
+            by_lap: false,
         };
         v.outcome = if track_changed {
             Outcome::CantTell(Reason::TrackChanged)
         } else if rewards_changed {
-            Outcome::CantTell(Reason::RewardsChanged)
+            let (nb, na) = (a.end - lap_lo, lap_hi - b.start);
+            v.n_before = nb;
+            v.n_after = na;
+            if nb < min_side || na < min_side {
+                Outcome::CantTell(Reason::TooShort(nb, na, min_side))
+            } else {
+                match (lap_series(&gens[lap_lo..a.end], min_side), lap_series(&gens[b.start..lap_hi], min_side)) {
+                    (Some(yb), Some(ya)) => match lap_slope_change(&yb, &ya) {
+                        Some((fb, fa, z)) => {
+                            v.z = Some(z);
+                            v.before = Some(fb);
+                            v.after = Some(fa);
+                            v.by_lap = true;
+                            if let (Some(lb), Some(la)) = (lap_median(&gens[lap_lo..a.end]), lap_median(&gens[b.start..lap_hi])) {
+                                v.lap_change = Some(la - lb);
+                            }
+                            if z > lap_threshold {
+                                Outcome::Helped
+                            } else if z < -lap_threshold {
+                                Outcome::Hurt
+                            } else {
+                                Outcome::CantTell(Reason::WithinNoise)
+                            }
+                        }
+                        None => Outcome::CantTell(Reason::RewardsChanged),
+                    },
+                    _ => Outcome::CantTell(Reason::RewardsChanged),
+                }
+            }
         } else if nb < min_side || na < min_side {
             Outcome::CantTell(Reason::TooShort(nb, na, min_side))
         } else if limit_changes(&limits, lo, hi) {
@@ -316,6 +378,30 @@ pub fn placebo_z(gens: &[Gen], runs: &[Run], own_from: usize, window: usize, min
             }
             if let (Some(yb), Some(ya)) = (medians(&gens[lo..c]), medians(&gens[c..hi])) {
                 if let Some((_, _, z)) = slope_change(&yb, &ya) {
+                    out.push(z.abs());
+                }
+            }
+            c += min_side;
+        }
+    }
+    out
+}
+
+/// Placebo |z| for lap-time verdicts: fake change points inside unchanged runs, judged on the
+/// best-lap series (no time-limit truncation, like the real lap verdicts).
+pub fn placebo_z_lap(gens: &[Gen], runs: &[Run], own_from: usize, window: usize, min_side: usize) -> Vec<f64> {
+    let mut out = Vec::new();
+    for r in runs {
+        let start = r.start.max(own_from);
+        if r.end < start + 2 * min_side {
+            continue;
+        }
+        let mut c = start + min_side;
+        while c + min_side <= r.end {
+            let lo = c.saturating_sub(window).max(start);
+            let hi = (c + window).min(r.end);
+            if let (Some(yb), Some(ya)) = (lap_series(&gens[lo..c], min_side), lap_series(&gens[c..hi], min_side)) {
+                if let Some((_, _, z)) = lap_slope_change(&yb, &ya) {
                     out.push(z.abs());
                 }
             }

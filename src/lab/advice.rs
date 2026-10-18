@@ -346,7 +346,11 @@ pub fn advise(lib: &Library, n: &Network) -> Option<Advice> {
         out.push(Suggestion {
             strength: Strength::Fact,
             text: format!("Earlier in this network, {} at gen {} clearly {}.", v.change, v.at, if v.outcome == Outcome::Helped { "helped" } else { "hurt" }),
-            why: format!("Before/after test: z = {:+.1}, threshold {:.1}.", v.z.unwrap_or(0.0), lib.threshold),
+            why: if v.by_lap {
+                format!("Before/after test on lap time: z = {:+.1}, threshold {:.1}.", v.z.unwrap_or(0.0), lib.lap_threshold)
+            } else {
+                format!("Before/after test: z = {:+.1}, threshold {:.1}.", v.z.unwrap_or(0.0), lib.threshold)
+            },
         });
     }
 

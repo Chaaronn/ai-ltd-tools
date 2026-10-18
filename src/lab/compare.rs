@@ -202,7 +202,7 @@ pub fn pooled_verdicts(lib: &Library, f: &Filters) -> PooledVerdicts {
             if !v.testable() {
                 let key = match &v.outcome {
                     Outcome::CantTell(Reason::TooShort(..)) => "too few generations",
-                    Outcome::CantTell(Reason::RewardsChanged) => "rewards changed too",
+                    Outcome::CantTell(Reason::RewardsChanged) => "rewards changed, no laps to judge by",
                     Outcome::CantTell(Reason::TrackChanged) => "track changed",
                     Outcome::CantTell(Reason::TimeLimitChanged) => "time limit changed in the window",
                     _ => "scores missing",
