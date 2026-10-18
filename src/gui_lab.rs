@@ -14,6 +14,7 @@ use track_builder::lab::format::{self, Gen, Save, CROSSOVER, SELECTION, VEHICLES
 use track_builder::lab::library::{self, Library, Network};
 use track_builder::lab::advice::{self, Advice};
 use track_builder::lab::designs;
+use track_builder::lab::detectability;
 use track_builder::lab::netviz;
 use track_builder::lab::keeper;
 use track_builder::lab::projection;
@@ -497,8 +498,19 @@ impl Lab {
                     ui.label(RichText::new(format!("Last gain {} gens ago", n.since_gain)).weak());
                 }
                 if let Some(k) = n.gens_to_verdict(lib.min_side) {
-                    ui.label(RichText::new(format!("· {k} more gens before the last change can get a verdict")).weak())
-                        .on_hover_text("A change needs enough generations either side to tell its effect from noise");
+                    let mut line = format!("· {k} more gens before the last change can get a verdict");
+                    let mut tip = "A change needs enough generations either side to tell its effect from noise".to_string();
+                    if let Some(plan) = detectability::forward_plan(lib, n) {
+                        if let Some(frag) = detectability::format_forward_header(&plan) {
+                            line.push(' ');
+                            line.push_str(&frag);
+                        }
+                        let det = detectability::format_forward(&plan);
+                        if !det.is_empty() {
+                            tip = det;
+                        }
+                    }
+                    ui.label(RichText::new(line).weak()).on_hover_text(tip);
                 }
             }
             if let Some(e) = &n.error {
@@ -531,7 +543,7 @@ impl Lab {
             self.strip(ui, n, "Spread", SPREAD, Gen::spread, None, "(Q3 − Q1) ÷ median: falling = the population is converging");
         }
         ui.add_space(6.0);
-        self.run_table(ui, n);
+        self.run_table(ui, lib, n);
     }
 
     /// The "Graph options" menu and quick zoom buttons. Returns a range to show: Some(None) = everything,
@@ -1018,7 +1030,7 @@ impl Lab {
         }
     }
 
-    fn run_table(&mut self, ui: &mut egui::Ui, n: &Network) {
+    fn run_table(&mut self, ui: &mut egui::Ui, lib: &Library, n: &Network) {
         let cols: [(Col, &str, f32, &str); 12] = [
             (Col::Start, "Start", 50.0, "First generation of the run"),
             (Col::Gens, "Gens", 42.0, "Generations in the run"),
@@ -1116,7 +1128,12 @@ impl Lab {
                                     Outcome::CantTell(verdict::Reason::TrackChanged) => "track changed".to_string(),
                                     Outcome::CantTell(_) => format!("● can't tell (z {:+.1})", v.z.unwrap_or(0.0)),
                                 };
-                                ui.add_sized([150.0, row_h], egui::Label::new(RichText::new(short).small().color(c)).truncate()).on_hover_text(format!("{}: {}", v.change, v.label()));
+                                let mut tip = format!("{}: {}", v.change, v.label());
+                                if let Some(r) = detectability::retrospective(lib, v) {
+                                    tip.push_str(". ");
+                                    tip.push_str(&detectability::format_retrospective(&r));
+                                }
+                                ui.add_sized([150.0, row_h], egui::Label::new(RichText::new(short).small().color(c)).truncate()).on_hover_text(tip);
                             }
                             None => {
                                 ui.add_sized([150.0, row_h], egui::Label::new(RichText::new("first run").small().weak()));
@@ -2677,6 +2694,9 @@ fn verdict_tooltip(ui: &mut egui::Ui, v: &Verdict, lib: &Library) {
             ui.label(format!("Median slope {:+.3} → {:+.3} per gen", b.slope, a.slope));
             ui.label(format!("z = {z:+.1} (clear above ±{:.1}) · {} gens before, {} after", lib.threshold, v.n_before, v.n_after));
         }
+    }
+    if let Some(r) = detectability::retrospective(lib, v) {
+        ui.label(detectability::format_retrospective(&r));
     }
     if let Some(l) = v.lap_change {
         ui.label(format!("Best lap {} {:.3} s (lap time always falls over time, so read with care)", if l < 0.0 { "faster by" } else { "slower by" }, l.abs()));

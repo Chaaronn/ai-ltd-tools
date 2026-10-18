@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use track_builder::lab::format::Save;
 use track_builder::lab::library::{self, Library};
-use track_builder::lab::{advice, compare, designs, overview, runs, verdict};
+use track_builder::lab::verdict::Fit;
+use track_builder::lab::{advice, compare, designs, detectability, overview, runs, verdict};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evolution")
@@ -413,4 +414,142 @@ fn track_names_round_trip_and_stay_out_of_the_game_folder() {
     assert_eq!(back["c75c00e2-cf27-4848-a6f0-f71a275d9f55"], "Monza");
     assert!(names::save_to(&dir.join("AI Learns To Drive").join("x.json"), &m).is_err());
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Faster again 3 truncated just after the reward-change run at 1208 starts (lap-path pending hold).
+fn truncated_pending_library() -> Library {
+    let order = [("Type 2", 1.0), ("Type 2.1", 2.0), ("Type 2.2", 3.0), ("Blank Mk1", 4.0), ("Faster again 3", 5.0)];
+    let loaded = order
+        .iter()
+        .map(|&(name, t)| {
+            let p = fixtures().join(format!("{name}.evolution"));
+            let mut s = Save::load(&p).unwrap();
+            if name == "Faster again 3" {
+                s.gens.truncate(1208 + 5);
+            }
+            (p, name.to_string(), t, Arc::new(s), None)
+        })
+        .collect();
+    library::analyse(&fixtures(), loaded, verdict::WINDOW, verdict::MIN_SIDE)
+}
+
+#[test]
+fn detectability_mde_matches_formula() {
+    let b = Fit { slope: 0.0, se: 0.2, sd: 1.0, mean: 0.0 };
+    let a = Fit { slope: 0.0, se: 0.3, sd: 1.0, mean: 0.0 };
+    let t = 4.0;
+    let expect = t * (0.2f64.powi(2) + 0.3f64.powi(2) + 1e-12).sqrt();
+    assert!((detectability::mde_slope(t, b.se, a.se) - expect).abs() < 1e-12);
+}
+
+#[test]
+fn detectability_forward_on_pending_after_short() {
+    let lib = truncated_pending_library();
+    assert!(lib.lap_placebo_points >= verdict::MIN_PLACEBO, "lap points {}", lib.lap_placebo_points);
+    let n = lib.by_file("Faster again 3").unwrap();
+    assert_eq!(n.gens(), 1213);
+    let v = detectability::pending_too_short(n).expect("pending TooShort-after");
+    assert!(matches!(v.outcome, verdict::Outcome::CantTell(verdict::Reason::TooShort(nb, na, need)) if nb >= need && na < need));
+
+    let plan = detectability::forward_plan(&lib, n).expect("forward plan");
+    assert!(plan.by_lap, "reward change at 1208 is judged on lap time");
+    assert!(!plan.at_window);
+    assert!(!plan.rows.is_empty());
+    assert!(plan.rows.iter().any(|r| r.gens_to_add > 0), "{:?}", plan.rows);
+    assert!(plan.rows.iter().all(|r| r.length <= plan.window));
+    let mdes: Vec<f64> = plan.rows.iter().map(|r| r.mde_per_10).collect();
+    assert!(mdes.windows(2).all(|w| w[1] <= w[0] + 1e-9), "MDE should not rise with longer holds: {mdes:?}");
+
+    let fmt = detectability::format_forward(&plan);
+    assert!(fmt.contains("Detectability"), "{fmt}");
+    let advice = advice::advise(&lib, n).unwrap();
+    let wait = advice.suggestions.iter().find(|s| s.text.starts_with("These settings")).expect("wait suggestion");
+    assert!(wait.why.contains("Detectability") || wait.why.contains("detect"), "{}", wait.why);
+}
+
+#[test]
+fn detectability_hidden_when_placebo_thin() {
+    let mut lib = truncated_pending_library();
+    lib.lap_placebo_points = 10;
+    lib.placebo_points = 10;
+    let n = lib.by_file("Faster again 3").unwrap();
+    assert!(detectability::forward_plan(&lib, n).is_none());
+
+    let thick = fixture_library();
+    let v = thick
+        .by_file("Type 2.2")
+        .unwrap()
+        .verdicts
+        .iter()
+        .find(|v| v.at == 528 && matches!(v.outcome, verdict::Outcome::CantTell(verdict::Reason::WithinNoise)))
+        .expect("WithinNoise at 528");
+    let mut thin = thick.clone();
+    thin.placebo_points = 10;
+    thin.lap_placebo_points = 10;
+    assert!(detectability::retrospective(&thin, v).is_none());
+}
+
+#[test]
+fn detectability_at_window_formatter() {
+    let plan = detectability::ForwardPlan {
+        by_lap: false,
+        n_after: 20,
+        min_side: 10,
+        window: 20,
+        rows: Vec::new(),
+        at_window: true,
+    };
+    let s = detectability::format_forward(&plan);
+    assert!(s.contains("will not improve detectability"), "{s}");
+    let h = detectability::format_forward_header(&plan).unwrap();
+    assert!(h.contains("will not improve detectability"), "{h}");
+}
+
+#[test]
+fn detectability_retrospective_within_noise() {
+    let lib = fixture_library();
+    assert!(lib.placebo_points >= verdict::MIN_PLACEBO);
+    assert!(lib.lap_placebo_points >= verdict::MIN_PLACEBO);
+
+    let score = lib
+        .by_file("Type 2.2")
+        .unwrap()
+        .verdicts
+        .iter()
+        .find(|v| v.at == 528 && matches!(v.outcome, verdict::Outcome::CantTell(verdict::Reason::WithinNoise)))
+        .expect("score WithinNoise");
+    assert!(!score.by_lap);
+    let r = detectability::retrospective(&lib, score).expect("score retrospective");
+    let s = detectability::format_retrospective(&r);
+    assert!(s.contains("would not have been flagged"), "{s}");
+    assert!(s.contains("score"), "{s}");
+
+    let lap = lib
+        .by_file("Faster again 3")
+        .unwrap()
+        .verdicts
+        .iter()
+        .find(|v| {
+            (v.at == 1092 || v.at == 1208)
+                && v.by_lap
+                && matches!(v.outcome, verdict::Outcome::CantTell(verdict::Reason::WithinNoise))
+        })
+        .expect("lap WithinNoise");
+    let r = detectability::retrospective(&lib, lap).expect("lap retrospective");
+    let s = detectability::format_retrospective(&r);
+    assert!(s.contains("would not have been flagged"), "{s}");
+    assert!(s.contains(" s "), "{s}");
+}
+
+#[test]
+fn detectability_short_before_has_no_forward_plan() {
+    let lib = fixture_library();
+    // Type 2.1 last change is TooShort with short before (1, 20, 10) style — not after-short pending.
+    let n = lib.by_file("Type 2.1").unwrap();
+    let last = n.verdicts.last().expect("verdicts");
+    if let verdict::Outcome::CantTell(verdict::Reason::TooShort(nb, _na, need)) = last.outcome {
+        assert!(nb < need, "fixture last TooShort should be short-before");
+    }
+    assert!(detectability::pending_too_short(n).is_none());
+    assert!(detectability::forward_plan(&lib, n).is_none());
 }

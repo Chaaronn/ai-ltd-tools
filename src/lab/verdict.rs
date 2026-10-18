@@ -179,7 +179,7 @@ pub fn fmt_opt(v: Option<f64>) -> String {
     }
 }
 
-fn medians(g: &[Gen]) -> Option<Vec<f64>> {
+pub(crate) fn medians(g: &[Gen]) -> Option<Vec<f64>> {
     g.iter().map(|x| x.median).collect()
 }
 
@@ -199,7 +199,7 @@ pub fn time_limits(g: &[Gen]) -> Vec<Option<f64>> {
 
 /// True if the time limit changes anywhere in `lo..hi`: scores before and after aren't on the
 /// same footing (a longer generation scores more just by lasting longer).
-fn limit_changes(limits: &[Option<f64>], lo: usize, hi: usize) -> bool {
+pub(crate) fn limit_changes(limits: &[Option<f64>], lo: usize, hi: usize) -> bool {
     limits[lo..hi].windows(2).any(|w| w[0].is_some() && w[1].is_some() && w[0] != w[1])
 }
 

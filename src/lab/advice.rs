@@ -5,6 +5,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::compare::{self, Measure, STAGES};
+use super::detectability;
 use super::library::{Library, Network};
 use super::overview::{self, Strength};
 use super::runs::{self, Run};
@@ -176,6 +177,13 @@ pub fn advise(lib: &Library, n: &Network) -> Option<Advice> {
             why: "The median hasn't beaten its best on this track and rewards by 1% in that time.".into(),
         });
     } else if run.len() < min_side && n.runs.len() > 1 {
+        let mut why = format!("A change needs {min_side} generations either side to be judged against noise.");
+        if let Some(plan) = detectability::forward_plan(lib, n) {
+            let det = detectability::format_forward_advice(&plan);
+            if !det.is_empty() {
+                why = format!("{why} {det}");
+            }
+        }
         out.push(Suggestion {
             strength: Strength::Fact,
             text: format!(
@@ -183,7 +191,7 @@ pub fn advise(lib: &Library, n: &Network) -> Option<Advice> {
                 run.len(),
                 min_side - run.len()
             ),
-            why: format!("A change needs {min_side} generations either side to be judged against noise."),
+            why,
         });
     } else {
         let lap_note = match lap {

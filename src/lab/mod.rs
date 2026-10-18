@@ -7,6 +7,7 @@
 pub mod advice;
 pub mod compare;
 pub mod designs;
+pub mod detectability;
 pub mod format;
 pub mod forks;
 pub mod keeper;
