@@ -16,6 +16,7 @@ use track_builder::trace::{trace, TraceParams};
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("simulation") => track_builder::simulation::cli::run(&args[1..]),
         Some("check") => {
             for f in &args[1..] {
                 let t = Track::load(&PathBuf::from(f))?;

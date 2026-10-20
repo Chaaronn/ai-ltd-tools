@@ -10,4 +10,5 @@ pub mod input;
 pub mod lab;
 pub mod pipeline;
 pub mod solve;
+pub mod simulation;
 pub mod trace;

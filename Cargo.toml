@@ -6,6 +6,10 @@ default-run = "track-builder"
 rust-version = "1.95"
 
 [dependencies]
+altd_sim = { git = "https://github.com/Zorro909/driving_sim_rs", rev = "ab3ec6799f55aaca5fb286e4fef60276b15f333a", default-features = false, features = ["server"] }
+rayon = "1"
+sha2 = "0.10"
+fs2 = "0.4"
 anyhow = "1.0.104"
 dirs = "7.0.0"
 eframe = "0.37.0"
@@ -13,7 +17,7 @@ flate2 = "1.1.10"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "webp", "gif"] }
 resvg = "0.48.1"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["preserve_order"] }
+serde_json = { version = "1.0.154", features = ["preserve_order", "float_roundtrip"] }
 uuid = { version = "1.28.0", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
