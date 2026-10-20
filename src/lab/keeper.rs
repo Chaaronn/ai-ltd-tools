@@ -1,9 +1,14 @@
 //! Best-lap keeper: when a network being trained saves a new best lap, write a copy of that
-//! save as "<name> (best lap).evolution", overwriting the previous copy only when the new lap is
-//! faster.
+//! save as "<name> (best lap · <track>).evolution", one copy per network and track, overwriting
+//! a copy only with a faster lap on the same track. (Copies were once one per network,
+//! "<name> (best lap).evolution"; switching tracks then replaced the old track's best. Those
+//! older copies are still recognised, and count for the track their saved network was on.)
+//! Which track a copy holds is read from the copy itself (its last generation), not its name,
+//! so renaming a track never orphans a copy.
 //!
-//! This is the Lab's only write, and it's fenced in:
-//! - it only ever writes files whose name ends in [`SUFFIX`] (checked by `keeper_path`);
+//! This is the Lab's main write, and it's fenced in:
+//! - it only ever writes files whose name is a keeper name (checked by `keeper_path` and again
+//!   by `write_copy`);
 //! - it never modifies, renames or deletes the game's own saves;
 //! - the copy is the save's own JSON with a new `Name` and a new random `Id` (a version-4 GUID,
 //!   so the game doesn't treat it as modded), gzip-compressed like the game's files;
@@ -21,26 +26,57 @@ use super::advice;
 use super::format::Save;
 use super::library::{Library, Network};
 
+/// Every keeper copy's name contains this, followed by ")" or " · <track>)".
+pub const MARK: &str = " (best lap";
+/// The older one-per-network suffix.
 pub const SUFFIX: &str = " (best lap)";
 /// Only networks saved this recently are being trained (seconds).
 pub const ACTIVE_SECONDS: f64 = 15.0 * 60.0;
 
-/// True for files the keeper made.
+/// True for files the keeper made (file stem, without ".evolution").
 pub fn is_keeper_copy(file: &str) -> bool {
-    file.ends_with(SUFFIX)
+    file.ends_with(')') && file.contains(MARK)
 }
 
-/// Where the copy of `file` goes. Refuses anything that wouldn't be a keeper copy.
-pub fn keeper_path(dir: &Path, file: &str) -> Result<PathBuf> {
-    if is_keeper_copy(file) || file.is_empty() || file.contains(['/', '\\']) {
+/// The save a keeper copy was made from.
+pub fn source_of(file: &str) -> Option<&str> {
+    if !is_keeper_copy(file) {
+        return None;
+    }
+    file.rfind(MARK).map(|i| &file[..i])
+}
+
+/// A track name made safe for a Windows file name.
+pub fn track_label(name: &str) -> String {
+    let s: String = name.chars().map(|c| if r#"<>:"/\|?*"#.contains(c) || c.is_control() { ' ' } else { c }).collect();
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let s: String = s.chars().take(40).collect();
+    let s = s.trim().trim_end_matches('.').to_string();
+    if s.is_empty() { "track".into() } else { s }
+}
+
+/// Where a new copy of `file` for a track labelled `label` goes. Refuses anything that wouldn't
+/// be a keeper copy.
+pub fn keeper_path(dir: &Path, file: &str, label: &str) -> Result<PathBuf> {
+    if is_keeper_copy(file) || file.is_empty() || file.contains(['/', '\\']) || label.contains(['/', '\\']) {
         bail!("not a source save: {file}");
     }
-    let p = dir.join(format!("{file}{SUFFIX}.evolution"));
-    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-    if !name.ends_with(&format!("{SUFFIX}.evolution")) {
+    let p = dir.join(format!("{file}{MARK} · {}).evolution", track_label(label)));
+    let stem = p.file_stem().and_then(|n| n.to_str()).unwrap_or_default();
+    if source_of(stem) != Some(file) || p.parent() != Some(dir) {
         bail!("refusing to write {}", p.display());
     }
     Ok(p)
+}
+
+/// The track key a save's network was last trained on (what a keeper copy holds).
+fn last_track(save: &Save) -> Option<String> {
+    super::runs::track_keys(&save.gens).pop()
+}
+
+/// The existing keeper copy of network `file` for `track`, if there is one.
+pub fn copy_for<'a>(lib: &'a Library, file: &str, track: &str) -> Option<&'a Network> {
+    lib.networks.iter().filter(|o| source_of(&o.file) == Some(file)).find(|o| last_track(&o.save).as_deref() == Some(track)).map(|o| &**o)
 }
 
 #[derive(Clone, Debug)]
@@ -72,8 +108,21 @@ pub fn due(lib: &Library, n: &Network, now: f64) -> Option<(PathBuf, Option<f64>
         return None;
     }
     let track = &n.runs.last()?.track;
-    let path = keeper_path(&lib.dir, &n.file).ok()?;
-    let previous = lib.networks.iter().find(|o| o.path == path).and_then(|o| best_on(&o.save, track));
+    // only a copy holding this track is ever replaced; copies for other tracks are left alone
+    let (path, previous) = match copy_for(lib, &n.file, track) {
+        Some(o) => (o.path.clone(), best_on(&o.save, track)),
+        None => {
+            let mut p = keeper_path(&lib.dir, &n.file, &b.track_name).ok()?;
+            // a copy with that name already holds another track (e.g. a renamed track): use the id
+            if lib.networks.iter().any(|o| o.path == p) {
+                p = keeper_path(&lib.dir, &n.file, &format!("{} {}", b.track_name, &track[..track.len().min(8)])).ok()?;
+                if lib.networks.iter().any(|o| o.path == p) {
+                    return None;
+                }
+            }
+            (p, None)
+        }
+    };
     if previous.is_some_and(|p| p <= b.seconds) {
         return None;
     }
@@ -84,7 +133,7 @@ pub fn due(lib: &Library, n: &Network, now: f64) -> Option<(PathBuf, Option<f64>
 /// having saved again since the Lab read it.
 pub fn write_copy(source: &Path, dest: &Path, expect_gens: usize) -> Result<()> {
     let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-    if !name.ends_with(&format!("{SUFFIX}.evolution")) {
+    if !name.ends_with(".evolution") || !is_keeper_copy(name.trim_end_matches(".evolution")) {
         bail!("refusing to write {}", dest.display());
     }
     let bytes = std::fs::read(source).with_context(|| format!("reading {}", source.display()))?;
@@ -120,7 +169,7 @@ pub fn run(lib: &Library, now: f64) -> (Vec<Kept>, Vec<String>) {
         match write_copy(&n.path, &dest, n.gens()) {
             Ok(()) => kept.push(Kept {
                 source: n.file.clone(),
-                copy: format!("{}{SUFFIX}", n.file),
+                copy: dest.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
                 seconds: b.seconds,
                 track: b.track_name.clone(),
                 generation: b.at,
@@ -139,9 +188,22 @@ mod tests {
     #[test]
     fn only_keeper_names_are_writable() {
         let d = Path::new("/tmp/x");
-        assert!(keeper_path(d, "snow nosw").unwrap().ends_with("snow nosw (best lap).evolution"));
-        assert!(keeper_path(d, "snow nosw (best lap)").is_err(), "no copies of copies");
-        assert!(keeper_path(d, "../evil").is_err());
+        assert!(keeper_path(d, "snow nosw", "Autumn 06").unwrap().ends_with("snow nosw (best lap · Autumn 06).evolution"));
+        assert!(keeper_path(d, "snow nosw (best lap)", "Autumn 06").is_err(), "no copies of copies");
+        assert!(keeper_path(d, "snow nosw (best lap · Autumn 06)", "x").is_err());
+        assert!(keeper_path(d, "../evil", "x").is_err());
+        assert!(keeper_path(d, "a", "../../evil").is_err());
         assert!(write_copy(Path::new("a.evolution"), Path::new("/tmp/x/real save.evolution"), 0).is_err());
+        assert!(write_copy(Path::new("a.evolution"), Path::new("/tmp/x/real (best lap) save.evolution"), 0).is_err());
+    }
+
+    #[test]
+    fn names_round_trip() {
+        assert_eq!(source_of("Type 2 (best lap)"), Some("Type 2"), "old-style copies still recognised");
+        assert_eq!(source_of("Type 2 (best lap · Autumn 06)"), Some("Type 2"));
+        assert_eq!(source_of("Type 2"), None);
+        assert!(!is_keeper_copy("my (best lap) notes"));
+        assert_eq!(track_label(r#"Las: Vegas/"Night"?"#), "Las Vegas Night");
+        assert_eq!(track_label("..."), "track");
     }
 }

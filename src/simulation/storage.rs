@@ -91,6 +91,23 @@ impl Store {
         out.sort();
         Ok(out)
     }
+    /// When the job was created (its specification file's time), for ordering the queue.
+    pub fn created(&self, id: &str) -> Option<std::time::SystemTime> {
+        fs::metadata(self.job(id).ok()?.join("spec.json")).ok()?.modified().ok()
+    }
+    /// Delete a finished job's folder (specification, progress, checkpoints, results).
+    /// Refuses jobs that could still run: only completed, cancelled or failed ones go.
+    pub fn remove(&self, id: &str) -> Result<()> {
+        let dir = self.job(id)?;
+        ensure!(dir.parent() == Some(self.root.as_path()), "Refusing to remove {}", dir.display());
+        let p = self.progress(id)?;
+        ensure!(
+            matches!(p.status, Status::Completed | Status::Cancelled | Status::Failed),
+            "Only completed, cancelled or failed jobs can be removed; pause and cancel it first"
+        );
+        ensure!(!self.active_job(id), "This job's worker is still running");
+        fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))
+    }
     pub fn lock(&self) -> Result<File> {
         fs::create_dir_all(&self.root)?;
         let f = OpenOptions::new()
@@ -149,7 +166,7 @@ impl Store {
         Ok(())
     }
     pub fn control(&self, id: &str, control: Control) -> Result<()> {
-        let mut p = self.progress(id)?;
+        let p = self.progress(id)?;
         if p.status == Status::Completed || p.status == Status::Cancelled {
             return Ok(());
         }
@@ -161,6 +178,11 @@ impl Store {
             },
         )?;
         if let Ok(_guard) = self.lock() {
+            // The worker may have committed a newer generation while the control was written.
+            let mut p = self.progress(id)?;
+            if matches!(p.status, Status::Completed | Status::Cancelled) {
+                return Ok(());
+            }
             p.status = if control == Control::Cancel {
                 Status::Cancelled
             } else {

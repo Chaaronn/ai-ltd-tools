@@ -1,7 +1,7 @@
 //! Comparing network designs: inputs (sensors), layers, size and outputs.
 //!
 //! A design is fixed for a whole network (or for long stretches of it), so every comparison
-//! here counts networks, not runs: each network contributes one median per stage.
+//! here collapses runs per network, then networks per detected family, at each stage.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -83,7 +83,7 @@ pub struct Feature {
     pub name: String,
     pub with_nets: Vec<String>,
     pub without_nets: Vec<String>,
-    /// Per stage: (network medians with, network medians without), sorted.
+    /// Per stage: (family medians with, family medians without), sorted.
     pub stages: [(Vec<f64>, Vec<f64>); NSTAGES],
 }
 
@@ -133,6 +133,7 @@ pub fn features(lib: &Library, measure: Measure) -> Vec<Feature> {
     let mut out = Vec::new();
     for (kind, name) in names {
         let mut f = Feature { kind, name: name.clone(), with_nets: Vec::new(), without_nets: Vec::new(), stages: Default::default() };
+        let mut per: BTreeMap<(usize, bool, String, String), Vec<f64>> = BTreeMap::new();
         for (file, a, m) in &rows {
             let w = has(a, kind, &name);
             let list = if w { &mut f.with_nets } else { &mut f.without_nets };
@@ -141,12 +142,21 @@ pub fn features(lib: &Library, measure: Measure) -> Vec<Feature> {
             }
             for s in 0..NSTAGES {
                 if let Some(v) = m[s] {
-                    if w { f.stages[s].0.push(v) } else { f.stages[s].1.push(v) }
+                    let n = lib.by_file(file).unwrap();
+                    per.entry((s, w, overview::family(lib, n).into(), file.clone())).or_default().push(v);
                 }
             }
         }
         if f.with_nets.is_empty() || f.without_nets.is_empty() {
             continue;
+        }
+        let mut families: BTreeMap<(usize, bool, String), Vec<f64>> = BTreeMap::new();
+        for ((s, w, family, _), mut values) in per {
+            families.entry((s, w, family)).or_default().push(runs::median(&mut values).unwrap());
+        }
+        for ((s, w, _), mut values) in families {
+            let v = runs::median(&mut values).unwrap();
+            if w { f.stages[s].0.push(v) } else { f.stages[s].1.push(v) }
         }
         for s in 0..NSTAGES {
             f.stages[s].0.sort_by(f64::total_cmp);

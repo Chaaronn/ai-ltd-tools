@@ -2,14 +2,15 @@
 
 **Status:** built (v0.1–v0.3, October 2026); see [evolution-lab.md](evolution-lab.md) for the implementation · **Owner:** Matt · **Home:** a second tab in Track Builder (`track-builder` repo)
 
-Evolution Lab is an **evaluate-only** analysis tool for the game's saved neural-network populations. It answers one
+Evolution Lab analyses the game's saved neural-network populations and runs isolated simulation experiments. It answers one
 question: **"which training settings actually work, at which stage of training?"** Every generation the game has ever
 trained is already logged inside its save files, so the tool reads that log, splits it into runs of unchanged
 settings, and compares those runs fairly.
 
-> **Hard constraint: the tool can't make anything, only evaluate.** It never creates, copies, edits or deletes a file,
-> in the game folder or anywhere else, with one exception the player asked for later: the best-lap copy (O-10). There are no exports, no archive, no notes file and no on-disk cache. Everything
-> it shows is computed in memory from the saves as they are, and disappears when the app closes.
+> **Hard constraint: original game networks remain untouched.** Observed analysis reads saves;
+> the optional best-lap keeper creates its explicitly named copies (O-10). Evidence-ledger data
+> and simulation jobs use separate application-data storage. Simulator-trained networks are never
+> exported to the game. Simulation results never enter the observed-history evidence ledger.
 
 ---
 
@@ -37,15 +38,15 @@ settings changes. The tool's second job is therefore to be honest about **what t
 3. **Judge each change honestly.** For every settings change, say whether it made a clear difference, or that the
    data can't tell, measured against how often the same test fires at random.
 4. **Spot stalls.** Show when a network has stopped improving, and for how long.
-5. **Zero setup, zero output.** No recording step, no game changes and no files written: it works on existing saves
+5. **Observed analysis needs no recording step.** It works on existing saves without changing the game
    and updates as training continues.
 
 ## 3. Non-goals
 
 | Not doing | Why |
 |---|---|
-| Controlling the game or running training automatically | Needs hooks into the game; risky, and the game owns the training loop. Read-only keeps saves safe. |
-| Creating files: exports, CSV, archives, notes, caches | The tool evaluates. The one exception, added at the player's request, is the best-lap copy (O-10), which only ever writes "(best lap)" files. |
+| Controlling or automating training inside the game | The game owns its training loop. Headless simulation is isolated and never controls the game. |
+| Exporting simulated networks to the game | Simulation produces experiment artifacts in application data, not playable `.evolution` files. |
 | Applying settings to the game | It suggests next settings with their evidence (see O-5), but never changes anything; the decision stays with the player. |
 | Per-car or per-run replays | Only per-generation summary stats are saved, not individual cars. |
 | Editing or repairing `.evolution` files | Read-only by design, so a bug can never corrupt a population. |
@@ -79,7 +80,7 @@ settings changes. The tool's second job is therefore to be honest about **what t
 | `WasEliminationEnabled` / `WasEliminationDisabled` | Elimination setting |
 | `MutationRate` | e.g. 0.2 (null in 900 old records) |
 | `SelectionAlgorithm` | 0 Best, 1 Tournament, 2 Roulette |
-| `SelectionSize` | Parents kept |
+| `SelectionSize` | Selection size (parents picked to breed; also the number kept unchanged when Preserve parents keeps the selected parents, which isn't saved) |
 | `CrossoverAlgorithm` | 0 None, 1 SinglePoint, 2 Uniform |
 | `WeightDecay` | |
 | `Rewards.Ratios[]` | `{Model:{Metric, Type}, Value}`: weight of each reward metric |
@@ -187,7 +188,7 @@ generation history of the save it came from, so `Id` can't be used to spot copie
 | P0-4 | **Network timeline:** charts of median (with the quartile band), best and average score; best lap time; best speed; all against generation, with runs shown as coloured background bands labelled by mutation rate. | Hovering a generation shows all its fields; hovering a band shows the run's settings and gains; it renders 1,500 generations without visible lag. |
 | P0-5 | **Run table** for the selected network: start gen, length, mutation, selection (+size), crossover, rewards summary, start and end median, score gain, lap gain, stability. | Sortable by any column; clicking a row highlights that band on the timeline. |
 | P0-6 | **Settings comparison:** every run (≥10 generations by default) across all networks, grouped by mutation-rate bucket and split by stage, showing count, median gain and spread. Fork-shared generations count once. | The bucket × stage grid shows *n* in every cell; cells with n < 5 are greyed and labelled "too few runs". |
-| P0-7 | **Evaluate-only:** the tool writes nothing, anywhere. | Saves are opened read-only; the `lab` module has no file-write, create, copy or rename calls (checked by a test that greps the source); no cache or settings file is created. |
+| P0-7 | **Original saves remain read-only.** | Observed analysis opens saves read-only. The optional keeper writes named copies; ledger and simulation persistence stay in application data, separate from the save scanner. |
 | P0-8 | **Fork detection** as defined in §5. | On the dev machine it finds exactly the 4 families in §9.3 with the stated divergence points, and nests the forks under their parents. |
 | P0-9 | **Before/after verdicts** with placebo calibration, as defined in §5. | Every change point gets "clearly helped", "clearly hurt" or "can't tell" with the reason; the threshold is recomputed from the loaded saves; the change tooltip shows slopes before and after, *N* each side and the placebo threshold. |
 | P0-10 | **Stall marker** as defined in §5. | Stalls of 50+ generations are hatched on the timeline; the latest generation shows the running count. |
@@ -218,7 +219,7 @@ Players asked for a summary of what has worked best, not just the evidence. Buil
 | O-5 | **Now training:** detect the save being trained (newest mtime) and suggest its next settings. | Timing advice first (stalled / wait / still improving); every suggestion carries its evidence label and why; lap time is the measure on a fixed track with laps. |
 | O-7 | **Network designs:** compare inputs, outputs, layers and size, counted per network. | Designs come from the save and its snapshots; design rows in every playbook; a with/without table per input and output; same-track comparisons. |
 | O-8 | **Reward-independent measures:** compare by lap time (default), survival or generation length; score is kept as the second choice. | Every comparison view has the measure picker; suggestions use lap time, else survival. |
-| O-9 | **Keep the best network:** prompt to save a copy in the game when the network is at its best lap and no copy holds it. | Safe / save now / lost, from record histories; the Lab still writes nothing. |
+| O-9 | **Keep the best network:** prompt to save a copy in the game when the network is at its best lap and no copy holds it. | Safe / save now / lost, from record histories; the prompt does not write a save. |
 | O-10 | **Best-lap keeper:** write "<name> (best lap).evolution" when a network in training sets a new best lap, overwriting it only with a faster one. | Never touches other files; checked name; atomic replace; new v4 Id; copies shown under their source. |
 | O-11 | **Lap-time projection:** plateau, range and generations to a target. | Shown on Now training with the curve dashed ahead on the chart; "levelled off" after 40 gens without a faster lap. |
 | O-12 | **Stage by generations trained** (early < 200, mid < 1,000, late < 5,000, veteran after) and **time-limit aware** comparisons. | A new network is early; raising the time limit never makes it look more trained or create a fake gain; verdict windows stop at time-limit changes. |
@@ -227,7 +228,23 @@ Players asked for a summary of what has worked best, not just the evidence. Buil
 | O-15 | **Rewards:** reward changes judged on lap time (own placebo threshold); a reward setups table (gain by stage, generations to first lap, fastest lap, switch verdicts). | A reward change with laps both sides gets a verdict; setups' run counts add up to the counted runs; tested. |
 | O-16 | **Track names:** hint unnamed built-in tracks by their main network; let the player name them (saved in the tool's own settings). | Never writes in the game folder; names round-trip; tested. |
 | O-17 | **Swap card:** for barely-used sensors, replacement candidates from the with/without design evidence at the current stage. | Shows n and strength; "about even" and "no evidence yet" when thin; caveats visible. |
+| O-18 | **Clean test tracker:** progress to a judgeable change, readiness for the next change, library count of judgeable changes. | Matches the verdicts; counts from the last time-limit change. Timing advice prioritises a recent settings change's minimum observation window over a historical stall; regression-tested below and at the configured minimum. |
+| O-19 | **Input usage by sensitivity:** grids of inputs × snapshots and inputs × outputs on Now training; a library-wide ray-angle and sensor profile on What's worked best. | Per-output rows differ; dead and cancelling inputs read as unused; tested. |
+| O-20 | **Data gathering tab:** ranked experiment cards, habit scorecard, prediction replay against a no-change baseline, daily evidence ledger. | Cards only for unsettled questions; ranking and direct-test results use the card's displayed measure, with calibration on that measure; missing data never falls back to score or counts as within noise; settings ledger IDs distinguish measures; replay numbers finite; ledger never in the game folder; tested. |
+| O-21 | **Head-to-head on a track:** networks on one track lined up by generations on that track; lap, forecast, speed at matching time limits, and what differs. | Keeper copies excluded; at-limit table only for shared limits; reward differences flagged; tested. |
+| O-22 | **Mutation actually used:** the rate after the game's adaptive (size-based) scaling, shown beside the rate as set when the game's settings say adaptive mutation is on; "Parents kept" renamed "Selection size" with what it means. | Factor matches the game's formula; settings read-only (gzip or plain); no note when off, unknown, or under 2%; ledger ids unchanged; tested. |
 | O-6 | **Lap-based stage and stall** (stage superseded by O-12) where laps exist. | A reward tweak no longer makes a well-trained network look early, and a falling lap time isn't called a stall. |
+
+Evidence-counting contract for the playbook, design comparisons and experiment planner:
+
+- Aggregate run gains per network, then per detected ancestry family, within each setting and stage.
+- Rank and compare family medians. Show family counts separately from raw network/run counts.
+- Some evidence requires 5 versus 3 families and 60% pairwise wins; strong requires 8 versus 5 and 70%.
+  The existing minimum practical gap still applies. These are observational heuristics, not causal guarantees.
+- Direct tests settle a question only with three agreeing families and no opposing result. Repeated runs and
+  related saves do not add votes; a family with conflicting results counts on both sides.
+- Family-based ledger IDs keep these counts separate from older run-based history.
+- Regression checks cover repeated runs, related saves, contradictory direct tests, and unrelated families.
 
 ### P2: future
 
@@ -415,4 +432,26 @@ Lagging indicators, over one to two months:
    transfer.
 4. **Later (P2):** snapshot diff, then the parked ideas once there's more data.
 
-There are no external dependencies. Everything needed is in the save files and the existing app.
+Observed-history analysis uses the save files and existing app. Simulation adds the pinned
+`altd_sim` dependency and matching embedded resources described below.
+
+## 13. Isolated simulation experiments
+
+The implementation contract is documented in [simulation experiments](simulation-experiments.md).
+Simulation runs in a separate headless worker, using revision
+`ab3ec6799f55aaca5fb286e4fef60276b15f333a` of `driving_sim_rs`. No upstream server is started.
+Population is always 1,200, with a default two-hour active-compute session and generation-boundary
+recovery. Specifications, source/track hashes, settings, seeds, revision, backend, math profile,
+metrics and checkpoints live in dedicated application-data storage, outside observed-save scanning.
+
+Saved-weight experiments use paired initial populations but are not exact game continuations.
+Their five seeds remain one source family. Fresh campaigns use independently initialized seed
+families and unchanged baseline lineages at stages 0/200/1000/5000. Nearby designs are trained
+from scratch and judged as whole-training comparisons. Alternatives never overwrite a baseline.
+Results deduplicate resumes and repeated branches; missing laps cannot yield score-based lap wins.
+
+Simulation evidence uses Insufficient data / Mixed / Promising in simulation labels. Promising
+requires five independent families, 80% wins and a practical median improvement (1% lap/rate,
+two percentage points survival). These are screening rules and never promote observed advice.
+Playable network files remain untouched. GPU libraries are installed by the user, with actual
+backend/fallback recorded. Native-window and GPU hardware validation remain explicit release gates.

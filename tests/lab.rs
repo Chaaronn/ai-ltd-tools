@@ -144,15 +144,15 @@ fn lab_never_writes_files() {
             assert!(src.contains("refusing to write"), "keeper must check the destination name");
             continue;
         }
-        // track names: one settings file in the tool's own folder, never the game's
-        if f.file_name().is_some_and(|n| n == "names.rs") {
+        // track names and the evidence ledger: one settings file each in the tool's own folder
+        if f.file_name().is_some_and(|n| n == "names.rs" || n == "ledger.rs") {
             assert_eq!(src.matches("std::fs::write(").count(), 1);
             assert_eq!(src.matches("std::fs::rename(").count(), 1);
             assert_eq!(src.matches("create_dir_all(").count(), 1);
             for b in ["remove_file", "remove_dir", "fs::copy", "OpenOptions", "File::create"] {
                 assert!(!src.contains(b), "names.rs contains `{b}`");
             }
-            assert!(src.contains("refusing to write inside the game folder"));
+            assert!(src.contains("refusing to write inside the game folder"), "{} must refuse the game folder", f.display());
             continue;
         }
         for b in banned {
@@ -170,19 +170,19 @@ fn keeper_writes_a_valid_copy() {
     std::fs::create_dir_all(&dir).unwrap();
     let src = dir.join("Type 2.evolution");
     std::fs::copy(fixtures().join("Type 2.evolution"), &src).unwrap();
-    let dest = keeper::keeper_path(&dir, "Type 2").unwrap();
+    let dest = keeper::keeper_path(&dir, "Type 2", "Track A").unwrap();
     assert!(keeper::write_copy(&src, &dest, 1).is_err(), "refuses when the save changed since it was read");
     keeper::write_copy(&src, &dest, 289).unwrap();
     let orig = Save::load(&src).unwrap();
     let copy = Save::load(&dest).unwrap();
-    assert_eq!(copy.name, "Type 2 (best lap)");
+    assert_eq!(copy.name, "Type 2 (best lap · Track A)");
     assert_ne!(copy.id, orig.id);
     assert_eq!(copy.id.split('-').nth(2).unwrap().chars().next(), Some('4'), "a version-4 id, so not modded");
     assert_eq!(copy.gens.len(), orig.gens.len());
     assert!(copy.gens.iter().zip(&orig.gens).all(|(a, b)| a.hash == b.hash), "history identical");
     assert_eq!(copy.arch.params(), orig.arch.params());
     let lib = library::scan(&dir, None, verdict::WINDOW, verdict::MIN_SIDE);
-    let c = lib.by_file("Type 2 (best lap)").unwrap();
+    let c = lib.by_file("Type 2 (best lap · Track A)").unwrap();
     let parent = c.fork.parent.map(|(p, _)| lib.networks[p].file.clone());
     assert_eq!(parent.as_deref(), Some("Type 2"), "the copy hangs off its source");
     assert_eq!(lib.by_file("Type 2").unwrap().fork.parent, None, "the source is never a fork of its copy");
@@ -225,7 +225,8 @@ fn overview_playbook_and_findings() {
         for p in &c.picks {
             // best first, and every value shown has enough runs
             assert!(p.all.windows(2).all(|w| w[0].median() >= w[1].median()));
-            assert!(p.all.iter().all(|ch| ch.n() >= overview::MIN_RUNS));
+            assert!(p.all.iter().all(|ch| if p.design { ch.networks >= 2 } else { ch.runs >= overview::MIN_RUNS }));
+            assert!(p.all.iter().all(|ch| ch.n() <= ch.networks && ch.networks <= ch.runs));
             if let Some(r) = &p.runner_up {
                 if p.best.median() - r.median() < overview::PRACTICAL {
                     assert_eq!(p.strength, overview::Strength::Weak);
@@ -280,10 +281,10 @@ fn network_designs() {
     assert_eq!(a.hidden_label(), "5-5-5-4-3");
     // every run knows its design
     assert!(f.runs.iter().all(|r| r.arch.shape.len() >= 2));
-    // design picks are counted per network
+    // design picks are counted per detected family
     for c in overview::playbook(&lib, None, compare::Measure::Score, 10) {
         for p in c.picks.iter().filter(|p| p.design) {
-            assert!(p.all.iter().all(|ch| ch.unit == "networks"));
+            assert!(p.all.iter().all(|ch| ch.unit == "families" && ch.n() <= ch.networks && ch.networks <= ch.runs));
         }
     }
     let sums = designs::summaries(&lib, compare::Measure::Score);
@@ -294,14 +295,48 @@ fn network_designs() {
 }
 
 #[test]
+fn recent_settings_change_takes_priority_over_an_old_stall() {
+    for min_side in [10, 15] {
+        for elapsed in [1, min_side - 1, min_side] {
+            let mut save = Save::load(&fixtures().join("Type 2.evolution")).unwrap();
+            let template = save.gens[0].clone();
+            save.gens = (0..60 + elapsed).map(|i| {
+                let mut g = template.clone();
+                g.hash = i as u64 + 1;
+                g.track = Some("timing-test".into());
+                g.median = Some(100.0);
+                g.time = Some(30.0);
+                g.best_lap = None;
+                g.settings.time_limit = Some(30.0);
+                g.settings.mutation = Some(if i < 60 { 0.1 } else { 0.2 });
+                g
+            }).collect();
+            save.snapshots.clear();
+            save.snapshot_weights.clear();
+            let lib = library::analyse(Path::new("in-memory"), vec![("timing.evolution".into(), "timing".into(), 1.0, Arc::new(save), None)], 20, min_side);
+            let n = &lib.networks[0];
+            assert!(n.since_gain >= runs::STALL_GENS);
+            assert_eq!(n.runs.last().unwrap().len(), elapsed);
+            let advice = advice::advise(&lib, n).unwrap();
+            let timing = &advice.suggestions[0];
+            if elapsed < min_side {
+                assert!(timing.text.starts_with("These settings"), "{}", timing.text);
+                assert!(timing.text.contains(&format!("Give them {} more", min_side - elapsed)));
+                assert!(!advice.suggestions.iter().any(|s| s.text.starts_with("Stalled")));
+            } else {
+                assert!(timing.text.starts_with("Stalled"), "{}", timing.text);
+            }
+        }
+    }
+}
+
+#[test]
 fn best_lap_backup_status() {
     let lib = fixture_library();
-    // Type 2's whole history lives on in its copies Type 2.1 and 2.2, so its best lap is safe
+    // Type 2.1 and 2.2 share all of Type 2's history but went on to other tracks: they keep the
+    // record of Type 2's best lap, not its weights, so they don't protect it
     let t2 = advice::best_lap(&lib, lib.by_file("Type 2").unwrap()).expect("Type 2 laps");
-    match &t2.backup {
-        advice::Backup::Safe { copy } => assert!(copy.starts_with("Type 2.")),
-        other => panic!("expected safe, got {other:?}"),
-    }
+    assert!(!matches!(t2.backup, advice::Backup::Safe { .. }), "{:?}", t2.backup);
     // Faster again 3 has no copies: either save one now, or it has slowed since its best
     let f = advice::best_lap(&lib, lib.by_file("Faster again 3").unwrap()).unwrap();
     assert!(matches!(f.backup, advice::Backup::Needed | advice::Backup::Lost { .. }));
@@ -552,4 +587,181 @@ fn detectability_short_before_has_no_forward_plan() {
     }
     assert!(detectability::pending_too_short(n).is_none());
     assert!(detectability::forward_plan(&lib, n).is_none());
+}
+
+/// Build a library from in-memory saves (name, save, mtime).
+fn mem_library(saves: Vec<(&str, Save, f64)>) -> Library {
+    let loaded = saves.into_iter().map(|(name, s, t)| (fixtures().join(format!("{name}.evolution")), name.to_string(), t, Arc::new(s), None)).collect();
+    library::analyse(&fixtures(), loaded, verdict::WINDOW, verdict::MIN_SIDE)
+}
+
+/// A copy saved after the network got slower keeps the record of the best lap but not the
+/// network that set it, so it doesn't count as a backup; a copy saved at the best does.
+#[test]
+fn backup_needs_the_best_network_not_just_its_record() {
+    // Faster again 3 up to its best lap, then 30 slower generations (12 s on a 10 s best, say)
+    let orig = Save::load(&fixtures().join("Faster again 3.evolution")).unwrap();
+    let probe = mem_library(vec![("FA3", orig.clone(), 1.0)]);
+    let b = advice::best_lap(&probe, probe.by_file("FA3").unwrap()).unwrap();
+    let mut full = orig.clone();
+    full.gens.truncate(b.at + 1);
+    for k in 0..30u64 {
+        let mut g = full.gens[b.at].clone();
+        g.best_lap = Some(b.seconds * 1.2);
+        g.hash = 0xBAD0_0000 + k;
+        full.gens.push(g);
+    }
+    let mut slow = full.clone();
+    slow.gens.truncate(b.at + 20);
+    let mut at_best = full.clone();
+    at_best.gens.truncate(b.at + 1);
+    let lib = mem_library(vec![("FA3", full.clone(), 1.0), ("later copy", slow, 2.0)]);
+    let r = advice::best_lap(&lib, lib.by_file("FA3").unwrap()).unwrap();
+    assert_eq!(r.at, b.at);
+    assert!(!matches!(r.backup, advice::Backup::Safe { .. }), "a copy running slower isn't a backup: {:?}", r.backup);
+    let lib = mem_library(vec![("FA3", full, 1.0), ("copy at best", at_best, 2.0)]);
+    let r = advice::best_lap(&lib, lib.by_file("FA3").unwrap()).unwrap();
+    assert_eq!(r.backup, advice::Backup::Safe { copy: "copy at best".into() });
+}
+
+/// After switching tracks, a new best on the new track gets its own copy; the old track's copy
+/// is never the one replaced.
+#[test]
+fn keeper_keeps_one_copy_per_track() {
+    use track_builder::lab::keeper;
+    let t2 = Save::load(&fixtures().join("Type 2.evolution")).unwrap();
+    let mut t22 = Save::load(&fixtures().join("Type 2.2.evolution")).unwrap();
+    let keys = runs::track_keys(&t22.gens);
+    let (old_track, new_track) = (keys[0].clone(), keys.last().unwrap().clone());
+    assert_ne!(old_track, new_track, "Type 2.2 switched tracks");
+    // cut Type 2.2 at its best lap on the new track, so the latest generation set it
+    let probe = mem_library(vec![("Type 2.2", t22.clone(), 1.0)]);
+    let at = advice::best_lap(&probe, probe.by_file("Type 2.2").unwrap()).unwrap().at;
+    t22.gens.truncate(at + 1);
+    // an old-style copy made while it was on the first track (Type 2's history)
+    let lib = mem_library(vec![("Type 2.2", t22, 100.0), ("Type 2.2 (best lap)", t2, 50.0)]);
+    let n = lib.by_file("Type 2.2").unwrap();
+    let old = keeper::copy_for(&lib, "Type 2.2", &old_track).expect("the old copy holds the first track");
+    assert_eq!(old.file, "Type 2.2 (best lap)");
+    assert!(keeper::copy_for(&lib, "Type 2.2", &new_track).is_none());
+    let (dest, previous) = keeper::due(&lib, n, 100.0).expect("a new best on the new track is due");
+    assert_ne!(dest, old.path, "the first track's copy must not be overwritten");
+    assert!(dest.file_name().unwrap().to_string_lossy().starts_with("Type 2.2 (best lap · "));
+    assert_eq!(previous, None);
+}
+
+/// Data gathering: habits add up, every card is still open and points at real evidence, and
+/// the prediction replay produces sane numbers.
+#[test]
+fn data_gathering_is_consistent() {
+    use track_builder::lab::gather;
+    let lib = fixture_library();
+    let h = gather::habits(&lib);
+    assert!(h.judged <= h.changes && h.too_soon <= h.changes && h.with_time_limit <= h.changes);
+    assert!(h.isolated_limit_raises <= h.limit_raises && h.clean_reward_switches <= h.reward_switches);
+    let cards = gather::cards(&lib, advice::latest(&lib));
+    assert!(!cards.is_empty());
+    assert!(cards.windows(2).all(|w| w[0].score >= w[1].score), "most valuable first");
+    for c in &cards {
+        assert!(c.have < c.target, "{}: a settled question isn't a card", c.id);
+        assert!(!c.protocol.is_empty() && !c.evidence.is_empty());
+    }
+    // direct tests can't outnumber the clean single-setting changes at that stage
+    for card in cards.iter().filter(|c| c.direct.is_some()) {
+        let testable = lib.networks.iter().map(|n| {
+            verdict::verdicts_for_measure(&n.save.gens, &n.runs, card.measure, verdict::FALLBACK_THRESHOLD, lib.window, lib.min_side)
+                .iter().filter(|v| v.testable() && v.kind != "several").count()
+        }).sum::<usize>();
+        let c = card.direct.unwrap();
+        assert!(c.0 + c.1 + c.2 <= testable);
+        assert!(card.id.ends_with(card.measure.unit()));
+    }
+    let ids: std::collections::BTreeSet<&str> = cards.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids.len(), cards.len(), "ids are unique (they key the ledger)");
+    let (bt, odds) = gather::backtest(&lib);
+    assert_eq!(bt.len(), 2);
+    for b in &bt {
+        if b.points > 0 {
+            assert!(b.err_forecast.is_finite() && b.err_naive.is_finite() && b.err_old.is_finite());
+            assert!((0.0..=1.0).contains(&b.forecast_closer) && (0.0..=1.0).contains(&b.within_1pct));
+        }
+    }
+    assert!(odds.iter().all(|(_, k, n)| k <= n));
+}
+
+#[test]
+fn ledger_round_trips_and_stays_out_of_the_game_folder() {
+    use track_builder::lab::ledger::{self, Entry};
+    let dir = std::env::temp_dir().join(format!("tb-ledger-{}", std::process::id()));
+    let p = dir.join("evidence-ledger.json");
+    let e = Entry { date: "2026-10-19".into(), values: [("habit:judged".to_string(), 32.0)].into_iter().collect() };
+    ledger::save_to(&p, &[e.clone()]).unwrap();
+    assert_eq!(ledger::load_from(&p), vec![e.clone()]);
+    assert!(ledger::save_to(&dir.join("AI Learns To Drive").join("x.json"), &[e]).is_err());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The forecast never predicts a slower best lap, makes no wild promises, and reaches a target
+/// no later than it says.
+#[test]
+fn forecast_is_monotone_and_bounded() {
+    use track_builder::lab::projection;
+    let lib = fixture_library();
+    let n = lib.by_file("Faster again 3").unwrap();
+    let drift = projection::pooled_drift(&lib, Some(&n.file));
+    assert!(drift.points.windows(2).all(|w| w[0].0 < w[1].0));
+    assert_eq!(drift.at(0.0), 0.0);
+    let f = projection::forecast(n, &drift).expect("Faster again 3 has lap history");
+    assert!(f.curve.windows(2).all(|w| w[1].1 <= w[0].1 + 1e-12), "best so far never gets worse");
+    assert!(f.curve.iter().all(|p| p.1 <= f.best + 1e-12));
+    assert!((f.at(0) - f.best).abs() < 1e-9);
+    // no wild promises: the old curve could extrapolate far below anything ever seen
+    assert!(f.at(200) >= f.best * 0.9, "{} v best {}", f.at(200), f.best);
+    if let Some(g) = f.gens_to(f.at(100)) {
+        assert!(g <= 100);
+    }
+}
+
+/// Head-to-head: entries line up by generations on the track and only networks with their own
+/// training there count.
+#[test]
+fn head_to_head_lines_up_by_generations_on_track() {
+    use track_builder::lab::h2h;
+    let lib = fixture_library();
+    for t in overview::tracks(&lib) {
+        let es = h2h::compare(&lib, &t.key);
+        for e in &es {
+            assert!(e.points.len() >= 10);
+            assert!(e.points.iter().enumerate().all(|(k, p)| p.on_track == k));
+            assert!(e.at_limit.values().map(|a| a.gens).sum::<usize>() <= e.points.len());
+            if let (Some(f), Some(b)) = (e.forecast_100, e.best_lap) {
+                assert!(f <= b + 1e-9);
+            }
+        }
+        if es.len() < 2 {
+            assert!(h2h::shared_limits(&es).is_empty());
+        }
+    }
+}
+
+/// The adaptive-mutation flag is read (never written) from the game's settings file next to the
+/// evolution folder.
+#[test]
+fn adaptive_mutation_setting_is_read_from_the_game_settings() {
+    use track_builder::lab::mutation;
+    let root = std::env::temp_dir().join(format!("lab-mutation-{}", std::process::id()));
+    let evo = root.join("evolution");
+    std::fs::create_dir_all(&evo).unwrap();
+    std::fs::create_dir_all(root.join("settings")).unwrap();
+    assert_eq!(mutation::adaptive_setting(&evo), None);
+    std::fs::write(root.join("settings/local.settings"), r#"{"Evolution":{"IsAdaptiveMutationRate":true}}"#).unwrap();
+    assert_eq!(mutation::adaptive_setting(&evo), Some(true));
+    std::fs::write(root.join("settings/local.settings"), r#"{"Evolution":{"IsAdaptiveMutationRate":false}}"#).unwrap();
+    assert_eq!(mutation::adaptive_setting(&evo), Some(false));
+    // the game's own file is gzipped
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut gz, br#"{"Evolution":{"IsAdaptiveMutationRate":true}}"#).unwrap();
+    std::fs::write(root.join("settings/local.settings"), gz.finish().unwrap()).unwrap();
+    assert_eq!(mutation::adaptive_setting(&evo), Some(true));
+    let _ = std::fs::remove_dir_all(&root);
 }

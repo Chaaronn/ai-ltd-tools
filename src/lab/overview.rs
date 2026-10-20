@@ -34,10 +34,12 @@ impl Strength {
 #[derive(Clone, Debug)]
 pub struct Choice {
     pub label: String,
-    /// Sorted gains: one per run, or one per network for design features.
+    /// Sorted family medians (each network is reduced to a median first).
     pub gains: Vec<f64>,
-    /// "runs" or "networks"
+    /// Evidence unit: "families".
     pub unit: &'static str,
+    pub runs: usize,
+    pub networks: usize,
 }
 
 impl Choice {
@@ -47,17 +49,29 @@ impl Choice {
     pub fn median(&self) -> f64 {
         runs::quantile(&self.gains, 0.5)
     }
+    pub fn counts(&self) -> String {
+        format!("{} families · {} networks · {} runs", self.n(), self.networks, self.runs)
+    }
+}
+
+/// Root of the detected ancestry tree, including siblings whose ancestor is not saved.
+pub fn family<'a>(lib: &'a Library, n: &'a Network) -> &'a str {
+    let mut root = n;
+    while let Some((parent, _)) = root.fork.parent {
+        root = &lib.networks[parent];
+    }
+    &root.file
 }
 
 /// The best value of one setting at one stage.
 #[derive(Clone, Debug)]
 pub struct Pick {
     pub dimension: &'static str,
-    /// A network-design feature (counted per network), not a training setting.
+    /// A network-design feature, not a training setting.
     pub design: bool,
     pub best: Choice,
     pub runner_up: Option<Choice>,
-    /// Share of (best, runner-up) run pairs where the best one's run gained more.
+    /// Share of (best, runner-up) family-median pairs where the best gained more.
     pub beats: Option<f64>,
     pub strength: Strength,
     /// Every value with enough runs, best first.
@@ -104,8 +118,8 @@ pub fn strength(best: usize, runner: Option<usize>, p: Option<f64>) -> Strength 
 /// A setting (or network-design feature) the playbook compares.
 pub struct Dim {
     pub name: &'static str,
-    /// Network-design features are fixed per network, so their evidence is counted per network
-    /// (one median per network), not per run.
+    /// Design features require at least two contributing networks to be shown.
+    /// All dimensions use family medians for ranking and strength.
     pub per_network: bool,
     /// Only compared by lap time: changing the rewards rescales the score, so score-based gains
     /// can't be compared across reward setups.
@@ -113,12 +127,29 @@ pub struct Dim {
     pub key: fn(&Run) -> Option<String>,
 }
 
+/// What "Selection size" means (read from the game's code, Oct 2026).
+pub const SELECTION_SIZE_NOTE: &str = "Selection size: how many of the top cars are picked as parents to breed the next generation. With the game's \"Preserve parents\" set to keep the selected parents, those cars also carry over unchanged, so it's also the number kept; set to a fixed size, only that many are kept; set to none, no parents are kept. Saves don't record the Preserve parents setting.";
+
+/// Notes shown with a playbook dimension.
+pub fn dim_note(name: &str) -> Option<&'static str> {
+    match name {
+        "Selection size" => Some(SELECTION_SIZE_NOTE),
+        "Mutation" => Some("Mutation bands compare the rate as set. With adaptive mutation on, the game scales it by ×0.85 to ×1.0 depending on network size (bigger networks get less), smaller than the gap between bands."),
+        _ => None,
+    }
+}
+
+/// The name a dimension had in ledger ids (kept so the evidence ledger's history carries on).
+pub fn dim_id(name: &str) -> &str {
+    if name == "Selection size" { "Parents kept" } else { name }
+}
+
 pub fn dims() -> [Dim; 10] {
     [
         Dim { name: "Mutation", per_network: false, lap_only: false, key: |r| runs::bucket(r.settings.mutation).map(|b| BUCKETS[b].0.to_string()) },
         Dim { name: "Selection", per_network: false, lap_only: false, key: |r| r.settings.selection.map(|x| format::selection_name(Some(x)).to_string()) },
         Dim {
-            name: "Parents kept",
+            name: "Selection size",
             per_network: false,
             lap_only: false,
             key: |r| {
@@ -221,37 +252,31 @@ pub fn playbook(lib: &Library, track: Option<&str>, measure: Measure, min_len: u
                 continue;
             }
             let dim = d.name;
-            let unit = if d.per_network { "networks" } else { "runs" };
-            let mut groups: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-            if d.per_network {
-                // one value per network: the median of its runs' gains
-                let mut per: BTreeMap<(String, String), Vec<f64>> = BTreeMap::new();
-                for (n, r, g) in &rs {
-                    if let Some(k) = (d.key)(r) {
-                        per.entry((k, n.file.clone())).or_default().push(*g);
-                    }
-                }
-                for ((k, _), mut v) in per {
-                    if let Some(m) = runs::median(&mut v) {
-                        groups.entry(k).or_default().push(m);
-                    }
-                }
-            } else {
-                for (_, r, g) in &rs {
-                    if let Some(k) = (d.key)(r) {
-                        groups.entry(k).or_default().push(*g);
-                    }
+            // Collapse repeated runs within each network, then related networks within a family.
+            // Raw counts remain visible, but do not multiply a family's weight or confidence.
+            let mut per: BTreeMap<(String, String, String), Vec<f64>> = BTreeMap::new();
+            for (n, r, g) in &rs {
+                if let Some(k) = (d.key)(r) {
+                    per.entry((k, family(lib, n).into(), n.file.clone())).or_default().push(*g);
                 }
             }
-            let min = if d.per_network { 2 } else { MIN_RUNS };
-            let mut choices: Vec<Choice> = groups
-                .into_iter()
-                .filter(|(_, v)| v.len() >= min)
-                .map(|(label, mut gains)| {
-                    gains.sort_by(f64::total_cmp);
-                    Choice { label, gains, unit }
-                })
-                .collect();
+            let mut grouped: BTreeMap<String, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
+            let mut counts: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+            for ((label, family, _), mut gains) in per {
+                let count = counts.entry(label.clone()).or_default();
+                count.0 += gains.len();
+                count.1 += 1;
+                grouped.entry(label).or_default().entry(family).or_default().push(runs::median(&mut gains).unwrap());
+            }
+            let mut choices = Vec::new();
+            for (label, families) in grouped {
+                let (raw_runs, networks) = counts[&label];
+                // Keep thin comparisons visible as weak evidence instead of hiding the question.
+                if (d.per_network && networks < 2) || (!d.per_network && raw_runs < MIN_RUNS) { continue; }
+                let mut gains: Vec<f64> = families.into_values().filter_map(|mut g| runs::median(&mut g)).collect();
+                gains.sort_by(f64::total_cmp);
+                choices.push(Choice { label, gains, unit: "families", runs: raw_runs, networks });
+            }
             if choices.is_empty() {
                 continue;
             }
@@ -429,19 +454,18 @@ fn measure_unit(m: Measure) -> &'static str {
 fn pick_finding(prefix: &str, stage: usize, p: &Pick, m: Measure) -> Finding {
     let what = if p.dimension == "Mutation" { format!("mutation {}", p.best.label) } else { format!("{} {}", p.dimension.to_lowercase(), p.best.label) };
     let mut text = format!(
-        "{prefix}{} stage: {what} did best ({} {} per 10 gens over {} {})",
+        "{prefix}{} stage: {what} did best ({} {} per 10 gens; {})",
         stage_word(prefix, stage),
         m.fmt(p.best.median()),
         measure_unit(m),
-        p.best.n(),
-        p.best.unit
+        p.best.counts()
     );
     if let Some(r) = &p.runner_up {
-        text.push_str(&format!(", ahead of {} ({}, {} {})", r.label, m.fmt(r.median()), r.n(), r.unit));
+        text.push_str(&format!(", ahead of {} ({}, {})", r.label, m.fmt(r.median()), r.counts()));
     }
     text.push('.');
     let detail = match p.beats {
-        Some(b) => format!("A run with {what} out-gained a {} run {:.0}% of the time.", p.runner_up.as_ref().map_or("", |r| r.label.as_str()), b * 100.0),
+        Some(b) => format!("A family median with {what} out-gained a {} family median in {:.0}% of pairs. Families are inferred from shared saved history; this is observational evidence.", p.runner_up.as_ref().map_or("", |r| r.label.as_str()), b * 100.0),
         None => String::new(),
     };
     Finding { strength: p.strength, text, detail, link: None }

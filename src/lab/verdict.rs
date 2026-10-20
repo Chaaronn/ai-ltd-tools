@@ -3,6 +3,7 @@
 
 use super::format::{Gen, Settings};
 use super::runs::Run;
+use super::compare::Measure;
 
 /// Generations either side of a change (default window) and the minimum needed each side.
 pub const WINDOW: usize = 20;
@@ -58,6 +59,7 @@ pub enum Reason {
     TimeLimitChanged,
     TrackChanged,
     MissingScores,
+    MissingMeasure(Measure),
     WithinNoise,
 }
 
@@ -119,6 +121,7 @@ pub fn reason_text(r: &Reason) -> String {
         Reason::TimeLimitChanged => "the time limit changed within the window, so scores aren't comparable".into(),
         Reason::TrackChanged => "track changed too".into(),
         Reason::MissingScores => "scores missing".into(),
+        Reason::MissingMeasure(m) => format!("insufficient {} data", m.unit()),
         Reason::WithinNoise => "within noise".into(),
     }
 }
@@ -239,6 +242,25 @@ fn lap_median(g: &[Gen]) -> Option<f64> {
 /// A verdict for every change between consecutive runs.
 /// `lap_threshold` is used for changes judged on lap time (reward changes).
 pub fn verdicts(gens: &[Gen], runs: &[Run], threshold: f64, lap_threshold: f64, window: usize, min_side: usize) -> Vec<Verdict> {
+    evaluate(gens, runs, threshold, lap_threshold, window, min_side, None)
+}
+
+/// Judge a planned experiment on its declared measure, without falling back to score.
+pub fn verdicts_for_measure(gens: &[Gen], runs: &[Run], measure: Measure, threshold: f64, window: usize, min_side: usize) -> Vec<Verdict> {
+    evaluate(gens, runs, threshold, threshold, window, min_side, Some(measure))
+}
+
+fn measure_series(gens: &[Gen], measure: Measure, min: usize) -> Option<Vec<f64>> {
+    let values: Vec<f64> = match measure {
+        Measure::Lap => lap_series(gens, min)?.into_iter().map(|v| -v).collect(),
+        Measure::Score => medians(gens)?,
+        Measure::Rate => gens.iter().map(Gen::rate).collect::<Option<Vec<_>>>()?,
+        Measure::Survival => gens.iter().map(Gen::survival).collect::<Option<Vec<_>>>()?,
+    };
+    values.iter().all(|v| v.is_finite()).then_some(values)
+}
+
+fn evaluate(gens: &[Gen], runs: &[Run], threshold: f64, lap_threshold: f64, window: usize, min_side: usize, measure: Option<Measure>) -> Vec<Verdict> {
     let limits = time_limits(gens);
     let mut out = Vec::new();
     for j in 1..runs.len() {
@@ -291,6 +313,25 @@ pub fn verdicts(gens: &[Gen], runs: &[Run], threshold: f64, lap_threshold: f64, 
         };
         v.outcome = if track_changed {
             Outcome::CantTell(Reason::TrackChanged)
+        } else if let Some(m) = measure {
+            v.by_lap = m == Measure::Lap;
+            if nb < min_side || na < min_side {
+                Outcome::CantTell(Reason::TooShort(nb, na, min_side))
+            } else if limit_changes(&limits, lo, hi) {
+                Outcome::CantTell(Reason::TimeLimitChanged)
+            } else if rewards_changed && matches!(m, Measure::Score | Measure::Rate) {
+                Outcome::CantTell(Reason::RewardsChanged)
+            } else if let Some((fb, fa, z)) = measure_series(&gens[lo..a.end], m, min_side)
+                .zip(measure_series(&gens[b.start..hi], m, min_side))
+                .and_then(|(yb, ya)| slope_change(&yb, &ya))
+            {
+                v.z = Some(z);
+                v.before = Some(fb);
+                v.after = Some(fa);
+                if z > threshold { Outcome::Helped } else if z < -threshold { Outcome::Hurt } else { Outcome::CantTell(Reason::WithinNoise) }
+            } else {
+                Outcome::CantTell(Reason::MissingMeasure(m))
+            }
         } else if rewards_changed {
             let (nb, na) = (a.end - lap_lo, lap_hi - b.start);
             v.n_before = nb;
@@ -406,6 +447,30 @@ pub fn placebo_z_lap(gens: &[Gen], runs: &[Run], own_from: usize, window: usize,
                 }
             }
             c += min_side;
+        }
+    }
+    out
+}
+
+/// Placebo calibration for the experiment's measure, using fixed-time-limit windows.
+pub fn placebo_z_for_measure(gens: &[Gen], runs: &[Run], own_from: usize, window: usize, min_side: usize, measure: Measure) -> Vec<f64> {
+    let limits = time_limits(gens);
+    let mut out = Vec::new();
+    let min_side = min_side.max(3);
+    for r in runs {
+        let start = r.start.max(own_from);
+        for c in ((start + min_side)..=r.end.saturating_sub(min_side)).step_by(min_side) {
+            let lo = c.saturating_sub(window).max(start);
+            let hi = (c + window).min(r.end);
+            if c - lo < min_side || hi - c < min_side || limit_changes(&limits, lo, hi) {
+                continue;
+            }
+            if let Some((_, _, z)) = measure_series(&gens[lo..c], measure, min_side)
+                .zip(measure_series(&gens[c..hi], measure, min_side))
+                .and_then(|(yb, ya)| slope_change(&yb, &ya))
+            {
+                out.push(z.abs());
+            }
         }
     }
     out

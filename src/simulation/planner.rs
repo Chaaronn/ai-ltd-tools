@@ -236,7 +236,7 @@ pub fn design_alternatives(
 /// The card's stage and measure rank the observed alternatives; never invent a bucket midpoint.
 pub fn for_card(
     lib: &Library,
-    spec: &JobSpec,
+    spec: &mut JobSpec,
     card: &crate::lab::gather::Card,
 ) -> Result<Vec<Arm>> {
     let parts: Vec<_> = card.id.split(':').collect();
@@ -253,7 +253,6 @@ pub fn for_card(
         !["Population", "Rewards"].contains(&dim),
         "Population is fixed at 1,200; reward experiments are not settings comparisons"
     );
-    let mut arms = settings_alternatives(lib, spec.input.vehicle, &spec.baseline, Some(dim));
     let measure = match spec.measure {
         Measure::Lap => crate::lab::compare::Measure::Lap,
         Measure::Rate => crate::lab::compare::Measure::Rate,
@@ -273,45 +272,96 @@ pub fn for_card(
                 "This card no longer has a supported comparison; refresh Data gathering"
             )
         })?;
-    let current = lib
-        .networks
-        .iter()
-        .filter(|n| n.save.vehicle == Some(spec.input.vehicle))
-        .flat_map(|n| &n.runs)
-        .find(|r| matches_setting(dim, &spec.baseline, r))
-        .and_then(|r| overview::dim_label(dim, r))
-        .ok_or_else(|| {
-            anyhow::anyhow!("Current setting has no compatible observed value for this card")
-        })?;
     let runner = pick
         .runner_up
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("This question has no alternative"))?;
-    let target = if current == pick.best.label {
-        &runner.label
-    } else if current == runner.label {
-        &pick.best.label
-    } else {
-        anyhow::bail!(
-            "Current setting is outside this card's compared values; use a fresh campaign"
-        )
-    };
-    arms.retain(|arm| {
+    let vehicle = spec.input.vehicle;
+    let runs_of = move |any: bool| {
         lib.networks
             .iter()
-            .filter(|n| n.save.vehicle == Some(spec.input.vehicle))
-            .flat_map(|n| &n.runs)
-            .any(|r| {
-                overview::dim_label(dim, r).as_ref() == Some(target)
-                    && matches_setting(dim, &arm.settings, r)
-            })
-    });
-    arms.truncate(1);
-    ensure!(
-        !arms.is_empty(),
-        "No distinct supported alternative exists for this vehicle"
-    );
-    Ok(arms)
+            .filter(move |n| any || n.save.vehicle == Some(vehicle))
+            .flat_map(|n| n.runs.iter().filter(move |r| r.start >= n.fork.own_from))
+    };
+    let runs = || runs_of(false);
+    // The most common value trained with inside a compared range, applied to `base`: from this
+    // vehicle's runs, or any vehicle's when this one never used that range.
+    let value_in = |label: &str, base: &Settings| -> Option<Settings> {
+        for any in [false, true] {
+            let mut counts: Vec<(Settings, usize)> = vec![];
+            for r in runs_of(any).filter(|r| overview::dim_label(dim, r).as_deref() == Some(label)) {
+                let Some(s) = with_value(dim, base, r) else { continue };
+                match counts.iter_mut().find(|(c, _)| *c == s) {
+                    Some(c) => c.1 += 1,
+                    None => counts.push((s, 1)),
+                }
+            }
+            if let Some((s, _)) = counts.into_iter().filter(|(s, _)| s.validate().is_ok() && s != base).max_by_key(|(_, n)| *n) {
+                return Some(s);
+            }
+        }
+        None
+    };
+    let current = runs()
+        .find(|r| matches_setting(dim, &spec.baseline, r))
+        .and_then(|r| overview::dim_label(dim, r));
+    let arm_settings = if current.as_deref() == Some(pick.best.label.as_str()) {
+        value_in(&runner.label, &spec.baseline)
+    } else if current.as_deref() == Some(runner.label.as_str()) {
+        value_in(&pick.best.label, &spec.baseline)
+    } else {
+        // The network's own value is in neither compared range: test the card's two options
+        // against each other, with the current advice's alternative as the baseline.
+        let base = value_in(&runner.label, &spec.baseline)
+            .ok_or_else(|| anyhow::anyhow!("No run of this vehicle has used {} {}", dim.to_lowercase(), runner.label))?;
+        let arm = value_in(&pick.best.label, &base);
+        spec.input.notes.push(format!(
+            "This network's {} is in neither of the card's ranges ({} vs {}), so the baseline uses {} and the alternative {}.",
+            dim.to_lowercase(),
+            pick.best.label,
+            runner.label,
+            setting_text(dim, &base),
+            arm.as_ref().map_or("?".into(), |a| setting_text(dim, a)),
+        ));
+        spec.baseline = base;
+        arm
+    };
+    let settings = arm_settings
+        .filter(|s| *s != spec.baseline)
+        .ok_or_else(|| anyhow::anyhow!("None of your saves has used a different {} in the card's other range, so there's no value to test", dim.to_lowercase()))?;
+    Ok(vec![Arm {
+        name: setting_text(dim, &settings),
+        settings,
+        design: None,
+    }])
+}
+
+/// `base` with one setting taken from an observed run.
+fn with_value(dim: &str, base: &Settings, r: &crate::lab::runs::Run) -> Option<Settings> {
+    let mut s = base.clone();
+    match dim {
+        "Mutation" => s.mutation_rate = r.settings.mutation?,
+        "Selection" => s.selection_algorithm = ["best", "tournament", "roulette"].get(r.settings.selection? as usize)?.to_string(),
+        "Selection size" => s.selection_size = r.settings.selection_size? as usize,
+        "Crossover" => s.crossover = ["none", "single_point", "uniform"].get(r.settings.crossover? as usize)?.to_string(),
+        "Weight decay" => s.weight_decay = r.settings.weight_decay?,
+        "Elimination" => s.eliminate_on_wall = r.settings.elimination?,
+        _ => return None,
+    }
+    Some(s)
+}
+
+/// "Mutation 0.05", "Selection size 10", ... for one setting.
+fn setting_text(dim: &str, s: &Settings) -> String {
+    match dim {
+        "Mutation" => format!("Mutation {}", (s.mutation_rate * 10000.0).round() / 10000.0),
+        "Selection" => format!("Selection {}", s.selection_algorithm),
+        "Selection size" => format!("Selection size {}", s.selection_size),
+        "Crossover" => format!("Crossover {}", s.crossover.replace('_', " ")),
+        "Weight decay" => format!("Weight decay {}", s.weight_decay),
+        "Elimination" => format!("Elimination {}", if s.eliminate_on_wall { "on" } else { "off" }),
+        _ => dim.to_string(),
+    }
 }
 
 fn matches_setting(dim: &str, settings: &Settings, run: &crate::lab::runs::Run) -> bool {

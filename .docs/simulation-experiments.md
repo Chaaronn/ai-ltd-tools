@@ -10,24 +10,39 @@ The dependency and all resolved dependencies are pinned in `Cargo.lock`.
 ## Desktop workflow
 
 Build with `cargo build --release --bins` and keep the worker beside the desktop executable.
-Open **Evolution Lab → Data gathering → New simulation campaign**. Select a saved setup or
+Open **Evolution Lab → Simulation → New simulation campaign** (its own tab; Data gathering cards' **Simulate** buttons open it too). Select a saved setup or
 the rally preset, choose the mode, and supply an existing `.track` path (including workshop or
-user-created files) or explicitly select deterministic generated geometry. A campaign name alone
+user-created files; quotes from Explorer's "Copy as path" are stripped) or explicitly select deterministic generated geometry. A campaign name alone
 does not supply track geometry. The generated course is frozen in the specification.
 
 Prepare the review, choose the primary measure, positive generation time limit, stages, seed
 count, comparison generations, CPU threads, backend and session budget, and select at most
-three alternatives. Review complete baseline settings and provenance before creating the job.
-Start jobs from **Simulation queue and results**. Physics and reproduction run in the worker,
+three alternatives. Every baseline setting (mutation, adaptive mutation, selection and size, crossover,
+preserve parents and size, weight decay, elimination) is editable; alternatives keep their one
+change and follow the rest of an edited baseline. The review shows the total generations and,
+once a job has run on this computer, an estimated time, with each stage's share and a button to
+leave it out. Review complete baseline settings and provenance before creating the job.
+Jobs are listed newest first, one row each (status, campaign, progress, time left); the selected
+job opens below with its start/pause/cancel controls, key numbers and a results table (alternative,
+stage, verdict, median, seeds or families better), with the explanation behind **Details**.
+Completed, cancelled and failed jobs can be removed one at a time or with **Clear finished**, which
+deletes their folders from the simulation store (running, paused and queued jobs can't be removed).
+Data gathering cards show the results of campaigns started from them, with **View results**.
+Start jobs from the job list. Physics and reproduction run in the worker,
 while queue snapshots are read on a background thread. Supported setting cards offer **Simulate**;
 unsupported cards explain why they cannot use that protocol.
 
 All arms always contain **1,200** members. Population is never reduced for memory pressure.
 Saved files are read once into an immutable specification: later game saves do not change the job.
-Ordered sensors, outputs and full-precision parameters are preserved. Unknown mappings fail
-with an explanation. Saves with empty grip position descriptors require an explicit `(0,0)`
-choice; that assumption is recorded. Missing adaptive mutation, preservation and idle elimination
-settings use explicit, displayed defaults (off, selection-size preservation, off).
+Ordered sensors, outputs and full-precision parameters are preserved. A save's `Outputs` are the
+game's `NeuralNetworkOutputType` indices: 0 steering, 1 acceleration, 2 handbrake, 3 brake,
+4 boost (read from AILearnsToDrive.dll; the simulator's own templates use the same order). Unknown
+mappings fail with an explanation. Grip sensors with an empty `PositionOffset` get `(0,0)`: the game
+always creates them at `Vector2.Zero` and its JSON writer never saves the offset, so every save
+has `{}`. Saves don't record adaptive mutation, parent preservation (mode and size) or idle
+elimination; these come from the game's `settings/local.settings` next to the evolution folder
+(gzipped JSON; `PreserveParentsMode` 0 off, 1 the selected parents, 2 a custom number), with a note.
+If that file can't be read the defaults are off, selection-size preservation and off, also noted.
 
 ## Experiment semantics
 
@@ -49,15 +64,20 @@ settings use explicit, displayed defaults (off, selection-size preservation, off
 
 Endpoints evaluate frozen populations under the same conditions, without reproduction. Measures
 are best completed lap, median score divided by generation elapsed seconds, and active share.
-Lap comparisons require completed laps on both sides; missing laps never become score wins.
+Lap comparisons pair seeds where both sides completed a lap. A seed where only the alternative
+laps counts as a win, and only the control as a loss; these have no size, so they're shown
+separately and left out of the median. Missing laps never become score wins.
 Results show paired differences, family medians, win/tie/loss counts, missing pairs, backend
 and compatibility notes. Repeated/resumed observations deduplicate by seed, stage and arm.
 
 **Promising in simulation** requires at least five evaluable independent families, improvements
 in 80% or more of family comparisons and median improvement of at least 1% for lap/score rate or
 two percentage points for survival. Otherwise labels are **Mixed** or **Insufficient data**.
-These are screening heuristics, not statistical confidence claims. Saved-network seeds describe
-consistency within one source family. Simulation never upgrades real-game advice automatically,
+These are screening heuristics, not statistical confidence claims. Saved-weights seeds all start
+from one network, so they're one family and that label stays **Insufficient data**; their result is
+the seed label instead: **Consistently better/worse across seeds** (80%+ of seeds one way and a
+median of at least the practical size), **Mixed across seeds**, or too few seeds, with "x of y seeds
+better". That describes consistency for this network, not across networks. Simulation never upgrades real-game advice automatically,
 and never enters `lab::Library` or its evidence ledger. Confirm promising changes in the game.
 
 ## Compute and recovery
@@ -88,7 +108,7 @@ Throughput and remaining time are estimates from completed work, not a guarantee
 ```powershell
 cargo build --release --bins
 target/release/track-builder-cli simulation smoke
-target/release/track-builder-cli simulation prepare --save "network.evolution" --track "course.track" --mode saved --mutation 0.1 --origin-grip > campaign.json
+target/release/track-builder-cli simulation prepare --save "network.evolution" --track "course.track" --mode saved --mutation 0.1 > campaign.json
 target/release/track-builder-cli simulation prepare --generated-seed 1729 --mode fresh --time-limit 60 --mutation 0.1 > campaign.json
 target/release/track-builder-cli simulation create campaign.json
 target/release/track-builder-cli simulation start JOB-ID

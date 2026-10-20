@@ -8,8 +8,14 @@
 //! series and the last 60 generations give its range. When the main fit is effectively a
 //! straight line, or puts the plateau above the current best, there's no plateau in sight and
 //! the recent straight-line rate is used instead.
+//!
+//! Replayed over the player's history, that curve on its own did worse than assuming no change
+//! (and its "levelled off" call was usually wrong), so the app shows a [`Forecast`] instead: half
+//! the typical improvement other networks made over the same number of generations, half this
+//! network's curve shrunk to 20% of its predicted gain. See `.docs/evolution-lab.md`.
 
-use super::library::Network;
+use super::keeper;
+use super::library::{Library, Network};
 use super::runs;
 
 /// Default window: the latest this-many generations on the track.
@@ -190,6 +196,187 @@ pub fn project(n: &Network) -> Option<Projection> {
         fit.linear = true;
     }
     Some(Projection { from, to, best, best_at, fit, plateau, per_100 })
+}
+
+// ------------------------------------------------------------------ forecast
+
+/// Horizons (generations ahead) the pooled improvement is measured at.
+pub const HORIZONS: [usize; 6] = [0, 25, 50, 100, 150, 200];
+/// Weight of the pooled improvement in the forecast (the rest is this network's shrunk curve).
+pub const DRIFT_WEIGHT: f64 = 0.5;
+/// Share of the curve's predicted gain kept (the raw curve over-promises).
+pub const CURVE_SHRINK: f64 = 0.2;
+/// The forecast reaches this far ahead.
+pub const MAX_AHEAD: usize = 200;
+
+/// Typical relative improvement of the best-so-far lap over each horizon, pooled across
+/// networks: (horizon, median fraction, points).
+#[derive(Clone, Debug, Default)]
+pub struct Drift {
+    pub points: Vec<(usize, f64, usize)>,
+}
+
+impl Drift {
+    /// Fraction improved after `h` generations (interpolated; flat beyond the last horizon).
+    pub fn at(&self, h: f64) -> f64 {
+        let p = &self.points;
+        if p.is_empty() {
+            return 0.0;
+        }
+        for w in p.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if h <= b.0 as f64 {
+                let t = ((h - a.0 as f64) / (b.0 - a.0).max(1) as f64).clamp(0.0, 1.0);
+                return a.1 + (b.1 - a.1) * t;
+            }
+        }
+        p.last().unwrap().1
+    }
+}
+
+/// Best lap so far at each generation on `track` (None until the first lap there).
+fn best_so_far(n: &Network, keys: &[String], track: &str) -> Vec<Option<f64>> {
+    let mut cur: Option<f64> = None;
+    n.save
+        .gens
+        .iter()
+        .zip(keys)
+        .map(|(g, k)| {
+            if k == track {
+                if let Some(l) = g.best_lap {
+                    cur = Some(cur.map_or(l, |c: f64| c.min(l)));
+                }
+            }
+            cur
+        })
+        .collect()
+}
+
+/// Sample points from networks' own history: (network, gen t, track, best at t−1, gens since that
+/// best, best at t−1+h for each horizon where the track stays the same).
+fn samples(lib: &Library) -> Vec<(String, usize, f64, usize, Vec<(usize, f64)>)> {
+    let mut out = Vec::new();
+    for n in lib.networks.iter().filter(|n| !keeper::is_keeper_copy(&n.file) && n.gens() > n.fork.own_from) {
+        let g = &n.save.gens;
+        if !g.iter().any(|x| x.best_lap.is_some()) {
+            continue;
+        }
+        let keys = runs::track_keys(g);
+        let mut cache: std::collections::HashMap<String, Vec<Option<f64>>> = std::collections::HashMap::new();
+        let mut t = (n.fork.own_from + 40).max(60);
+        while t < g.len() {
+            let track = keys[t - 1].clone();
+            if track == runs::RANDOM_TRACK || track.is_empty() {
+                t += 10;
+                continue;
+            }
+            let bsf = cache.entry(track.clone()).or_insert_with(|| best_so_far(n, &keys, &track));
+            let Some(b) = bsf[t - 1] else {
+                t += 10;
+                continue;
+            };
+            let since = (0..t).rev().find(|&i| keys[i] == track && g[i].best_lap.is_some_and(|l| l <= b + 1e-9)).map_or(0, |i| t - 1 - i);
+            let ahead: Vec<(usize, f64)> = HORIZONS
+                .iter()
+                .skip(1)
+                .copied()
+                .filter(|&h| t - 1 + h < g.len() && (t..t + h).all(|i| keys[i] == track))
+                .filter_map(|h| bsf[t - 1 + h].map(|x| (h, x)))
+                .collect();
+            out.push((n.file.clone(), t, b, since, ahead));
+            t += 10;
+        }
+    }
+    out
+}
+
+/// Pooled improvement over each horizon, leaving out network `exclude` (the one being forecast).
+pub fn pooled_drift(lib: &Library, exclude: Option<&str>) -> Drift {
+    let s = samples(lib);
+    let mut points = vec![(0usize, 0.0, 0usize)];
+    for &h in HORIZONS.iter().skip(1) {
+        let mut v: Vec<f64> = s
+            .iter()
+            .filter(|x| Some(x.0.as_str()) != exclude)
+            .filter_map(|x| x.4.iter().find(|a| a.0 == h).map(|a| (x.2 - a.1) / x.2))
+            .collect();
+        let n = v.len();
+        if let Some(m) = runs::median(&mut v) {
+            points.push((h, m.max(0.0), n));
+        }
+    }
+    Drift { points }
+}
+
+/// How often networks with no new best for a while went on to set one: buckets of generations
+/// since the best, (label, faster by 0.5%+ within 100 gens, points).
+pub fn faster_odds(lib: &Library, exclude: Option<&str>) -> Vec<(&'static str, usize, usize, std::ops::Range<usize>)> {
+    let s = samples(lib);
+    [("under 10", 0..10), ("10–39", 10..40), ("40 or more", 40..usize::MAX)]
+        .into_iter()
+        .map(|(label, r)| {
+            let pts: Vec<f64> = s
+                .iter()
+                .filter(|x| Some(x.0.as_str()) != exclude && r.contains(&x.3))
+                .filter_map(|x| x.4.iter().find(|a| a.0 == 100).map(|a| (x.2 - a.1) / x.2))
+                .collect();
+            (label, pts.iter().filter(|&&f| f >= 0.005).count(), pts.len(), r)
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+pub struct Forecast {
+    /// Best lap so far, and the generation index the forecast starts from (the next generation).
+    pub best: f64,
+    pub from: usize,
+    /// Generations since the best lap was set.
+    pub since_best: usize,
+    /// (generations ahead, forecast best lap), every 5 generations up to `MAX_AHEAD`.
+    pub curve: Vec<(usize, f64)>,
+    /// The curve fit the forecast leans on (still shown in the panel's small print).
+    pub projection: Projection,
+}
+
+impl Forecast {
+    /// Forecast best lap `h` generations ahead.
+    pub fn at(&self, h: usize) -> f64 {
+        let k = (h / 5).min(self.curve.len() - 1);
+        self.curve[k].1
+    }
+    /// Generations until the forecast reaches `target`, if within `MAX_AHEAD`.
+    pub fn gens_to(&self, target: f64) -> Option<usize> {
+        if target >= self.best {
+            return Some(0);
+        }
+        self.curve.iter().find(|p| p.1 <= target).map(|p| p.0)
+    }
+}
+
+/// The forecast for `n`'s current track. `drift` should leave `n` out (see `pooled_drift`).
+pub fn forecast(n: &Network, drift: &Drift) -> Option<Forecast> {
+    let p = project(n)?;
+    let g = &n.save.gens;
+    let keys = runs::track_keys(g);
+    let track = &n.runs.last()?.track;
+    let best = g.iter().zip(&keys).filter(|(_, k)| *k == track).filter_map(|(x, _)| x.best_lap).reduce(f64::min)?;
+    let since_best = (0..g.len()).rev().find(|&i| keys[i] == *track && g[i].best_lap.is_some_and(|l| l <= best + 1e-9)).map_or(0, |i| g.len() - 1 - i);
+    let now = g.len();
+    let curve_at = |h: usize| -> f64 {
+        let at = (now - 1 + h) as f64;
+        let raw = if p.fit.linear || p.plateau.is_none() { best + p.per_100.min(0.0) * h as f64 / 100.0 } else { p.fit.predict(at).min(best) };
+        best + (raw.min(best) - best) * CURVE_SHRINK
+    };
+    let mut run = best;
+    let curve = (0..=MAX_AHEAD / 5)
+        .map(|k| {
+            let h = k * 5;
+            let v = DRIFT_WEIGHT * best * (1.0 - drift.at(h as f64)) + (1.0 - DRIFT_WEIGHT) * curve_at(h);
+            run = run.min(v); // the best so far can't get worse
+            (h, run)
+        })
+        .collect();
+    Some(Forecast { best, from: now, since_best, curve, projection: p })
 }
 
 #[cfg(test)]

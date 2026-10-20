@@ -62,19 +62,19 @@ pub fn run(args: &[String]) -> Result<()> {
             }
         }
         _ => bail!(
-            "simulation: prepare [--save FILE] (--track FILE | --generated-seed N) [--mode fresh|saved|design] [--time-limit SECONDS] [--mutation RATE] [--origin-grip] | template | create SPEC.json | start ID | resume ID | pause ID | cancel ID | inspect ID | list | smoke"
+            "simulation: prepare [--save FILE] (--track FILE | --generated-seed N) [--mode fresh|saved|design] [--time-limit SECONDS] [--mutation RATE] | template | create SPEC.json | start ID | resume ID | pause ID | cancel ID | inspect ID | list | smoke"
         ),
     }
     Ok(())
 }
 
 fn prepare(args:&[String])->Result<JobSpec> {
-    let mut save=None;let mut track=None;let mut generated=None;let mut time=None;let mut mutation=None;let mut origin=false;let mut mode=CampaignMode::Fresh;
+    let mut save=None;let mut track=None;let mut generated=None;let mut time=None;let mut mutation=None;let mut mode=CampaignMode::Fresh;
     let mut i=0;
     while i<args.len(){
         let value=||args.get(i+1).context("Missing option value");
         match args[i].as_str(){
-            "--origin-grip"=>{origin=true;i+=1;continue;}
+            "--origin-grip"=>{i+=1;continue;} // accepted for old scripts: grip offsets are always (0,0)
             "--save"=>save=Some(value()?.clone()),
             "--track"=>track=Some(value()?.clone()),
             "--generated-seed"=>generated=Some(value()?.parse::<i64>()?),
@@ -85,7 +85,7 @@ fn prepare(args:&[String])->Result<JobSpec> {
         }i+=2;
     }
     anyhow::ensure!(track.is_some()!=generated.is_some(),"Choose either --track or --generated-seed");
-    let (mut input,baseline,inferred)=if let Some(path)=save{let path=std::path::Path::new(&path);let source=engine::read_gzip(path)?.1;engine::from_save(path,&source,origin)?}else{anyhow::ensure!(mode!=CampaignMode::SavedWeights,"Saved mode requires --save");(engine::preset(1,generated.unwrap_or(1729))?,Settings::default(),None)};
+    let (mut input,baseline,inferred)=if let Some(path)=save{let path=std::path::Path::new(&path);let source=engine::read_gzip(path)?.1;engine::from_save(path,&source)?}else{anyhow::ensure!(mode!=CampaignMode::SavedWeights,"Saved mode requires --save");(engine::preset(1,generated.unwrap_or(1729))?,Settings::default(),None)};
     engine::set_track(&mut input,track.as_deref().map(std::path::Path::new),generated.unwrap_or(1729))?;
     let mut spec=JobSpec::new(input,baseline,time.or(inferred).context("Supply --time-limit: source has no effective generation limit")?);spec.mode=mode;
     if mode==CampaignMode::SavedWeights{spec.title="Experiment initialized from saved weights".into();spec.stages=vec![0];}

@@ -97,11 +97,74 @@ pub fn set_track(input: &mut PreparedInput, path: Option<&Path>, seed: i64) -> R
     input.track_hash = hash(input.scene.to_string().as_bytes());
     Ok(())
 }
-pub fn from_save(
-    path: &Path,
-    family: &str,
-    explicit_origin_grip: bool,
-) -> Result<(PreparedInput, Settings, Option<f64>)> {
+/// The game's control order (`NeuralNetworkOutputType` in AILearnsToDrive.dll): a save's
+/// `Outputs` lists these indices in the network's output order.
+pub const GAME_CONTROLS: [&str; 5] = ["steering", "acceleration", "handbrake", "brake", "boost"];
+
+/// Settings a save doesn't record, taken from the game's settings file now (`None` = unreadable).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GameDefaults {
+    pub adaptive_mutation: Option<bool>,
+    pub preserve_parents: Option<String>,
+    pub preserve_parents_size: Option<usize>,
+    pub eliminate_when_idle: Option<bool>,
+}
+
+/// Read the unsaved settings from `<game folder>/settings/local.settings` (next to the evolution
+/// folder holding the save). `PreserveParentsMode`: 0 off, 1 the selected parents, 2 a custom size.
+pub fn game_defaults(evolution_dir: &Path) -> Option<GameDefaults> {
+    let v = crate::lab::mutation::game_settings(evolution_dir)?;
+    let e = v.get("Evolution")?;
+    Some(GameDefaults {
+        adaptive_mutation: e["IsAdaptiveMutationRate"].as_bool(),
+        preserve_parents: e["PreserveParentsMode"]
+            .as_u64()
+            .and_then(|m| ["off", "on_selection_size", "on_custom"].get(m as usize))
+            .map(|s| s.to_string()),
+        preserve_parents_size: e["PreserveParentsSize"].as_u64().map(|n| n as usize),
+        eliminate_when_idle: e["ShouldIdleEliminate"].as_bool(),
+    })
+}
+
+/// Apply the game's current unsaved settings, noting where each value came from.
+pub fn apply_game_defaults(settings: &mut Settings, defaults: Option<&GameDefaults>, notes: &mut Vec<String>) {
+    let Some(d) = defaults else {
+        notes.push("The game's settings file couldn't be read, so adaptive mutation (off), parent preservation (selection size) and idle elimination (off) are assumed. Saves don't record these; check them below.".into());
+        return;
+    };
+    let mut used = vec![];
+    if let Some(v) = d.adaptive_mutation {
+        settings.adaptive_mutation = v;
+        used.push(format!("adaptive mutation {}", if v { "on" } else { "off" }));
+    }
+    if let Some(v) = &d.preserve_parents {
+        settings.preserve_parents = v.clone();
+        used.push(format!(
+            "preserve parents: {}",
+            match v.as_str() {
+                "off" => "off",
+                "on_selection_size" => "the selected parents",
+                _ => "a custom number",
+            }
+        ));
+    }
+    if let Some(v) = d.preserve_parents_size.filter(|n| *n <= POPULATION) {
+        settings.preserve_parents_size = v;
+        if settings.preserve_parents == "on_custom" {
+            used.push(format!("keep {v}"));
+        }
+    }
+    if let Some(v) = d.eliminate_when_idle {
+        settings.eliminate_when_idle = v;
+        used.push(format!("idle elimination {}", if v { "on" } else { "off" }));
+    }
+    notes.push(format!(
+        "Saves don't record these, so they come from the game's settings now: {}. Older training may have used other values; edit them below.",
+        used.join(", ")
+    ));
+}
+
+pub fn from_save(path: &Path, family: &str) -> Result<(PreparedInput, Settings, Option<f64>)> {
     let (raw, source_hash) = read_gzip(path)?;
     let vehicle = raw["Type"].as_u64().context("Missing vehicle")?;
     ensure!(vehicle <= 3, "Unsupported vehicle");
@@ -109,21 +172,16 @@ pub fn from_save(
         .as_array()
         .context("Missing ordered sensors")?;
     let mut sensors = sensors.clone();
-    let mut notes=vec!["Save does not contain the complete game population/RNG. Adaptive mutation is explicitly off, preservation uses selection size, idle elimination is off; review these defaults.".into()];
+    let mut notes: Vec<String> = vec!["The save holds the best network, not the game's whole population or random state.".into()];
     for sensor in &mut sensors {
+        // The game always builds grip sensors at Vector2.Zero (SensorUnlockable.CreateInstance,
+        // GetDefaultSensors) and its JSON writer drops Vector2 fields, so every save has `{}`.
         if sensor["$type"] == "grip"
             && sensor["PositionOffset"]
                 .as_object()
                 .is_some_and(|o| o.is_empty())
         {
-            ensure!(
-                explicit_origin_grip,
-                "Grip PositionOffset is missing. Explicitly choose origin grip position in the campaign builder, or supply a complete sensor descriptor."
-            );
             sensor["PositionOffset"] = json!({"X":0.0,"Y":0.0});
-            notes.push(
-                "User explicitly selected grip position (0,0) for a missing descriptor.".into(),
-            );
         }
     }
     let names: Vec<String> = sensors
@@ -137,7 +195,7 @@ pub fn from_save(
         .iter()
         .map(|v| {
             let i = v.as_u64().context("Invalid output")? as usize;
-            ["acceleration", "steering", "brake", "handbrake", "boost"]
+            GAME_CONTROLS
                 .get(i)
                 .copied()
                 .context("Unsupported output")
@@ -150,9 +208,27 @@ pub fn from_save(
         .pointer("/Stats/Generations")
         .and_then(Value::as_array)
         .context("Missing training history; use a preset for an empty network")?;
-    let last = gens
-        .last()
-        .context("Empty training history; use a preset")?;
+    // A network that hasn't trained yet (a new design) has no history to read settings from:
+    // take them from the game's current settings, which is what it would start training with.
+    let synthetic: Value;
+    let last = match gens.last() {
+        Some(l) => l,
+        None => {
+            let e = path
+                .parent()
+                .and_then(crate::lab::mutation::game_settings)
+                .and_then(|v| v.get("Evolution").cloned())
+                .context("This network hasn't trained yet and the game's settings file couldn't be read, so there are no settings to start from; use the fresh preset instead")?;
+            let mut l = e.clone();
+            l["WasEliminationEnabled"] = e["ShouldEliminate"].clone();
+            l["Time"] = e["TimeLimit"].clone();
+            l["ActiveCount"] = json!(1);
+            notes.clear();
+            notes.push("This network hasn't trained yet: its design is used with fresh random weights, and its starting settings come from the game's settings now. Check them below.".into());
+            synthetic = l;
+            &synthetic
+        }
+    };
     let select = last["SelectionAlgorithm"]
         .as_u64()
         .context("Missing selection")? as usize;
@@ -227,8 +303,11 @@ pub fn from_save(
         rewards,
         ..Settings::default()
     };
+    let mut settings = settings;
+    apply_game_defaults(&mut settings, path.parent().and_then(game_defaults).as_ref(), &mut notes);
     let time = gens
         .iter()
+        .chain(gens.is_empty().then_some(last))
         .rev()
         .find(|g| g["ActiveCount"].as_u64().is_some_and(|v| v > 0))
         .and_then(|g| g["Time"].as_f64())
@@ -305,10 +384,14 @@ pub fn validate_input(input: &PreparedInput) -> Result<()> {
     Ok(())
 }
 
-pub fn design_description(input:&PreparedInput)->String {
-    let shape:Vec<usize>=serde_json::from_value(input.network["shape"].clone()).unwrap_or_default();
-    let parameters:usize=shape.windows(2).map(|w|(w[0]+1)*w[1]).sum();
-    format!("Layers {shape:?} · {parameters} parameters\nOrdered inputs: {}\nOrdered outputs: {}",input.network["inputs"],input.network["outputs"])
+pub fn design_description(input: &PreparedInput) -> String {
+    let shape: Vec<usize> =
+        serde_json::from_value(input.network["shape"].clone()).unwrap_or_default();
+    let parameters: usize = shape.windows(2).map(|w| (w[0] + 1) * w[1]).sum();
+    format!(
+        "Layers {shape:?} · {parameters} parameters\nOrdered inputs: {}\nOrdered outputs: {}",
+        input.network["inputs"], input.network["outputs"]
+    )
 }
 
 pub struct SimulationEngine {
@@ -417,11 +500,14 @@ impl SimulationEngine {
     }
     fn drive_batches(&mut self, stop: &mut impl FnMut() -> bool) -> Result<bool> {
         let safe = self.limit.saturating_sub(18);
+        // Bigger batches on the GPU: each call is a round trip, and between calls the worker
+        // checks for pause/cancel. 600 ticks is 10 simulated seconds.
+        let batch = if self.session.backend() == altd_sim::training::session::Backend::Hip { 600 } else { 120 };
         while self.session.runner.tick < safe {
             if stop() {
                 return Ok(false);
             }
-            let n = (safe - self.session.runner.tick).min(60);
+            let n = (safe - self.session.runner.tick).min(batch);
             let done = self.session.advance(n, true).map_err(anyhow::Error::msg)?;
             if done < n {
                 self.session.sync().map_err(anyhow::Error::msg)?;
@@ -436,6 +522,10 @@ impl SimulationEngine {
             .map_err(anyhow::Error::msg)?;
         self.session.sync().map_err(anyhow::Error::msg)?;
         Ok(true)
+    }
+    /// Physics ticks driven this generation (valid after `drive` returns true).
+    pub fn ticks(&self) -> u64 {
+        self.session.runner.tick
     }
     pub fn reproduce(&mut self) -> Result<()> {
         self.session.next_generation().map_err(anyhow::Error::msg)?;

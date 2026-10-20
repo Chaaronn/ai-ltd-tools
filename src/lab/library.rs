@@ -63,6 +63,8 @@ pub struct Library {
     pub user_named: std::collections::HashSet<String>,
     /// Track `Id` -> the network with most of its own generations there (a hint for unnamed tracks).
     pub track_hints: HashMap<String, String>,
+    /// "Adaptive mutation rate" in the game's settings now (see `mutation`).
+    pub adaptive_mutation: Option<bool>,
 }
 
 impl Library {
@@ -137,6 +139,7 @@ pub fn scan(dir: &Path, previous: Option<&Library>, window: usize, min_side: usi
     lib.user_named = user.keys().cloned().collect();
     names.extend(user);
     lib.track_names = names;
+    lib.adaptive_mutation = super::mutation::adaptive_setting(dir);
     lib
 }
 
@@ -197,7 +200,7 @@ pub fn analyse(dir: &Path, loaded: Vec<(PathBuf, String, f64, Arc<Save>, Option<
     let mtimes: Vec<f64> = loaded.iter().map(|l| l.2).collect();
     let mut fork = forks::detect(&hashes, &mtimes);
     for (i, l) in loaded.iter().enumerate().filter(|(i, _)| keeper[*i]) {
-        let source = l.1.trim_end_matches(super::keeper::SUFFIX);
+        let source = super::keeper::source_of(&l.1).unwrap_or_default();
         let len = l.3.gens.len();
         if let Some(j) = loaded.iter().position(|o| o.1 == source) {
             fork[i] = ForkInfo { parent: Some((j, len)), parent_is_prefix: true, own_from: len };
@@ -256,5 +259,6 @@ pub fn analyse(dir: &Path, loaded: Vec<(PathBuf, String, f64, Arc<Save>, Option<
         track_names: HashMap::new(),
         user_named: Default::default(),
         track_hints,
+        adaptive_mutation: None,
     }
 }

@@ -78,7 +78,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // the app is designed dark; don't follow a light system theme
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        crate::theme::apply(&cc.egui_ctx);
         let mut app = App {
             image_path: None,
             image: None,
@@ -678,16 +678,29 @@ impl eframe::App for App {
             }
         }
 
-        egui::Panel::top("mode").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Cat's AI Ltd Tools").strong().size(15.0));
-                ui.separator();
-                ui.selectable_value(&mut self.mode, Mode::Builder, RichText::new("🛣  Track Builder").strong())
-                    .on_hover_text("Turn a course map into a track");
-                ui.selectable_value(&mut self.mode, Mode::Lab, RichText::new("🧬  Evolution Lab").strong())
-                    .on_hover_text("See which training settings worked, from your saved networks (read-only)");
+        egui::Panel::top("mode")
+            .frame(egui::Frame::new().fill(crate::theme::PANEL).inner_margin(egui::Margin::symmetric(16, 8)).stroke(egui::Stroke::new(1.0, crate::theme::BORDER)))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    use crate::theme::*;
+                    ui.label(RichText::new("Cat's AI Ltd Tools").font(semibold(15.0)));
+                    ui.add_space(16.0);
+                    egui::Frame::new().fill(SUNKEN).stroke(egui::Stroke::new(1.0, BORDER)).corner_radius(8).inner_margin(3).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for (mode, label, tip) in [
+                            (Mode::Builder, "Track Builder", "Turn a course map into a track"),
+                            (Mode::Lab, "Evolution Lab", "See which training settings worked, from your saved networks"),
+                        ] {
+                            let on = self.mode == mode;
+                            let text = RichText::new(label).font(if on { medium(13.0) } else { sans(13.0) }).color(if on { TEXT } else { MUTED });
+                            let b = egui::Button::new(text).fill(if on { SELECTED } else { egui::Color32::TRANSPARENT }).stroke(egui::Stroke::NONE).corner_radius(6);
+                            if ui.add(b).on_hover_text(tip).clicked() {
+                                self.mode = mode;
+                            }
+                        }
+                    });
+                });
             });
-        });
         if self.mode == Mode::Lab {
             self.lab.get_or_insert_with(|| crate::gui_lab::Lab::new(None)).ui(ui);
             return;

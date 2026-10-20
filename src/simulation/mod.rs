@@ -150,6 +150,26 @@ impl Settings {
             .map(|(k, _)| k.clone())
             .collect()
     }
+    /// This arm moved onto a new baseline: the fields where the arm differed from `old`
+    /// keep the arm's values, everything else follows `new`.
+    pub fn rebase(&self, old: &Self, new: &Self) -> Self {
+        let arm = serde_json::to_value(self).unwrap();
+        let old = serde_json::to_value(old).unwrap();
+        let mut out = serde_json::to_value(new).unwrap();
+        for (k, v) in arm.as_object().unwrap() {
+            if old.get(k) != Some(v) {
+                out[k] = v.clone();
+            }
+        }
+        serde_json::from_value(out).unwrap_or_else(|_| self.clone())
+    }
+}
+
+impl PreparedInput {
+    /// Layer sizes, input first.
+    pub fn shape(&self) -> Vec<u32> {
+        serde_json::from_value(self.network["shape"].clone()).unwrap_or_default()
+    }
 }
 
 /// Ordered and full-precision inputs; only the engine adapter interprets these documents.
@@ -373,6 +393,47 @@ pub struct Progress {
     pub note: Option<String>,
     pub observations: Vec<Observation>,
     pub error: Option<String>,
+    /// Where the worker's time goes, averaged over recent generations.
+    #[serde(default)]
+    pub perf: Option<Perf>,
+}
+
+/// Recent per-generation timings (exponential moving averages, seconds).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Perf {
+    /// Generations measured this session.
+    pub generations: u64,
+    /// Simulated length of a generation, in physics ticks (60 per simulated second).
+    pub ticks: f64,
+    /// Driving the cars.
+    pub physics: f64,
+    /// Breeding the next generation.
+    pub reproduce: f64,
+    /// Writing checkpoints, metrics and progress (only when a checkpoint is due).
+    pub saving: f64,
+    /// Generations between checkpoints, on average.
+    pub per_checkpoint: f64,
+}
+impl Perf {
+    pub fn add(&mut self, ticks: f64, physics: f64, reproduce: f64, saving: f64, wrote: bool) {
+        // weight recent generations: about the last 20
+        let a = if self.generations == 0 { 1.0 } else { 0.1 };
+        let mix = |old: f64, new: f64| old + a * (new - old);
+        self.ticks = mix(self.ticks, ticks);
+        self.physics = mix(self.physics, physics);
+        self.reproduce = mix(self.reproduce, reproduce);
+        self.saving = mix(self.saving, saving);
+        self.per_checkpoint = mix(self.per_checkpoint, if wrote { 1.0 } else { 0.0 });
+        self.generations += 1;
+    }
+    /// Simulated seconds per wall-clock second while driving.
+    pub fn sim_speed(&self) -> Option<f64> {
+        (self.physics > 0.0).then(|| self.ticks / 60.0 / self.physics)
+    }
+    /// Wall-clock seconds per generation.
+    pub fn per_generation(&self) -> f64 {
+        self.physics + self.reproduce + self.saving
+    }
 }
 impl Default for Progress {
     fn default() -> Self {
@@ -388,6 +449,7 @@ impl Default for Progress {
             note: None,
             observations: vec![],
             error: None,
+            perf: None,
         }
     }
 }

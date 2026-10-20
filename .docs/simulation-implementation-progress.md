@@ -127,3 +127,27 @@ agent inventory. Root continued only to save this plan/status checkpoint after t
 Saved the full implementation contract and this status log at the user's explicit request.
 Confirmed the last simulation run completed with 12 passing tests and one ignored GPU test.
 No code changes were made between that request and writing these two documents.
+
+### 2026-10-19 — review fixes (Claude)
+
+- Controls: a save's `Outputs` now map with the game's enum (0 steering, 1 acceleration,
+  2 handbrake, 3 brake, 4 boost). Previously steering/acceleration and brake/handbrake were
+  swapped. The test now checks against the Lab's independent table and the simulator template.
+- Grip `PositionOffset: {}` becomes `(0,0)` automatically (the game always uses `Vector2.Zero` and
+  never saves it); the checkbox is gone and the CLI's `--origin-grip` is accepted but ignored.
+- Adaptive mutation, preserve parents (mode, size) and idle elimination come from the game's
+  `settings/local.settings`; every baseline setting is editable in the review; arms rebase onto
+  edits (`Settings::rebase`).
+- Results: one-sided laps count as wins/losses outside the median; saved-weights campaigns get a
+  seed-consistency label. Review shows total work, a measured-speed estimate and per-stage cost.
+- Simulation moved to its own Lab tab. `.track` paths have Explorer quotes stripped.
+- `gui_simulation` tests use egui 0.37's `run_ui`, so `cargo test` compiles and passes again.
+
+### 2026-10-20 — calmer look (Claude)
+
+- `src/theme.rs`: one palette (role-named colours, one accent), IBM Plex Sans/Mono embedded from
+  `assets/fonts` (OFL), egui visuals and spacing; segmented top bar; text-only sidebar nav rows.
+- Simulation tab: job list (status, campaign, progress, time left) plus a detail panel for the
+  selected job (controls, key numbers, results grid, details). `Store::remove` deletes completed,
+  cancelled or failed jobs; **Clear finished** removes them all. Queue is ordered newest first.
+- Data gathering cards show results of campaigns started from them, with **View results**.

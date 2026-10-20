@@ -4,6 +4,7 @@
 mod gui;
 mod gui_lab;
 mod gui_simulation;
+mod theme;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {

@@ -54,7 +54,7 @@ fn saved_weights_and_track_are_read_only_and_run_at_fixed_population() {
     let track = std::path::Path::new("tests/fixtures/autumn_03_mixed_surfaces.track");
     let before = std::fs::read(path).unwrap();
     let before_track = std::fs::read(track).unwrap();
-    let (mut input, baseline, _) = engine::from_save(path, "fixture-family", true).unwrap();
+    let (mut input, baseline, _) = engine::from_save(path, "fixture-family").unwrap();
     engine::set_track(&mut input, Some(track), 1729).unwrap();
     let mut spec = JobSpec::new(input, baseline, 0.2);
     spec.backend = track_builder::simulation::Backend::Cpu;
@@ -130,6 +130,87 @@ fn missing_laps_and_repeated_seeds_do_not_create_independent_wins() {
     assert_eq!(comparison.trials, 5);
     assert_eq!(comparison.families, 1);
     assert_eq!(comparison.label, "Insufficient data");
+    // ... but the seeds still say how consistent the change is for this one network
+    assert_eq!((comparison.seeds_better, comparison.seeds_compared), (5, 5));
+    assert_eq!(comparison.seed_label, "Consistently better across seeds");
+}
+
+#[test]
+fn laps_on_one_side_only_count_as_wins_or_losses_without_a_size() {
+    use track_builder::simulation::{Measure, Metrics, Observation, analysis};
+    let mut spec = JobSpec::smoke().unwrap();
+    spec.seeds = vec![1, 2, 3, 4, 5];
+    spec.measure = Measure::Lap;
+    let lap = |l: Option<f64>| Metrics { lap: l, rate: Some(1.0), survival: 1.0, lapped: l.map_or(0, |_| 10) };
+    let mut rows = vec![];
+    for seed in &spec.seeds {
+        // seeds 1-4: only the alternative laps; seed 5: both lap, alternative 2% faster
+        let (a, b) = if *seed < 5 { (None, Some(30.0)) } else { (Some(30.0), Some(29.4)) };
+        for (arm, m) in [(0, lap(a)), (1, lap(b))] {
+            rows.push(Observation { task: 0, seed: *seed, family: "f".into(), stage: 0, arm, metrics: m, backend: "Cpu".into(), note: None });
+        }
+    }
+    let c = &analysis::comparisons(&spec, &rows)[0];
+    assert_eq!((c.alternative_only_laps, c.control_only_laps, c.missing), (4, 0, 0));
+    assert_eq!((c.wins, c.losses, c.families), (5, 0, 5));
+    assert!((c.median.unwrap() - 2.0).abs() < 1e-9, "only the sized pair sets the median");
+    assert_eq!(c.label, "Promising in simulation");
+    // and the other way round they're losses
+    for r in &mut rows {
+        r.arm = 1 - r.arm;
+    }
+    let c = &analysis::comparisons(&spec, &rows)[0];
+    assert_eq!((c.alternative_only_laps, c.control_only_laps, c.wins, c.losses), (0, 4, 0, 5));
+}
+
+#[test]
+fn saved_networks_use_game_control_order_grip_origin_and_game_settings() {
+    use track_builder::simulation::engine;
+    let root = std::env::temp_dir().join(format!("simulation-game-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("evolution")).unwrap();
+    std::fs::create_dir_all(root.join("settings")).unwrap();
+    let save = root.join("evolution/Type 2.evolution");
+    std::fs::copy("tests/fixtures/evolution/Type 2.evolution", &save).unwrap();
+    // without a settings file the defaults are used and say so
+    let (input, settings, _) = engine::from_save(&save, "fixture").unwrap();
+    assert!(!settings.adaptive_mutation);
+    assert!(input.notes.iter().any(|n| n.contains("couldn't be read")));
+    // the grip sensor's empty offset becomes the game's (0,0) without asking
+    let prepared = serde_json::to_value(&input).unwrap();
+    let grip = prepared["model"]["sensor_layout"]["sensors"].as_array().unwrap().iter().find(|s| s["$type"] == "grip").unwrap().clone();
+    assert_eq!(grip["PositionOffset"], serde_json::json!({"X": 0.0, "Y": 0.0}));
+    // the game's settings file (gzipped) supplies what saves don't record
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(
+        &mut gz,
+        br#"{"Evolution":{"IsAdaptiveMutationRate":true,"PreserveParentsMode":2,"PreserveParentsSize":3,"ShouldIdleEliminate":true}}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("settings/local.settings"), gz.finish().unwrap()).unwrap();
+    let (input, settings, _) = engine::from_save(&save, "fixture").unwrap();
+    assert!(settings.adaptive_mutation);
+    assert_eq!(settings.preserve_parents, "on_custom");
+    assert_eq!(settings.preserve_parents_size, 3);
+    assert!(settings.eliminate_when_idle);
+    assert!(input.notes.iter().any(|n| n.contains("game's settings now")));
+    settings.validate().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn alternatives_follow_baseline_edits_but_keep_their_one_change() {
+    let spec = JobSpec::smoke().unwrap();
+    let old = spec.baseline.clone();
+    let mut arm = old.clone();
+    arm.mutation_rate = old.mutation_rate + 0.1;
+    let mut new = old.clone();
+    new.adaptive_mutation = !old.adaptive_mutation;
+    new.selection_size = 7;
+    let moved = arm.rebase(&old, &new);
+    assert_eq!(moved.mutation_rate, arm.mutation_rate);
+    assert_eq!(moved.adaptive_mutation, new.adaptive_mutation);
+    assert_eq!(moved.selection_size, 7);
+    assert_eq!(moved.difference(&new), vec!["mutation_rate".to_string()]);
 }
 
 #[test]
@@ -267,7 +348,7 @@ fn adapter_preserves_saved_parameter_and_control_order() {
     use track_builder::simulation::engine;
     let path = std::path::Path::new("tests/fixtures/evolution/Type 2.evolution");
     let (raw, _) = engine::read_gzip(path).unwrap();
-    let (input, _, _) = engine::from_save(path, "fixture", true).unwrap();
+    let (input, _, _) = engine::from_save(path, "fixture").unwrap();
     let prepared = serde_json::to_value(input).unwrap();
     assert_eq!(
         raw["NeuralNetwork"]["Weights"],
@@ -277,15 +358,35 @@ fn adapter_preserves_saved_parameter_and_control_order() {
         raw["NeuralNetwork"]["Biases"],
         prepared["network"]["biases"]
     );
-    let names = ["acceleration", "steering", "brake", "handbrake", "boost"];
-    for (a, b) in raw["Outputs"]
+    // Independent of the adapter's table: the Lab's names for the game's output enum
+    // (Steering 0, Acceleration 1, Handbrake 2, Brake 3, Boost 4).
+    let lab_names = track_builder::lab::format::OUTPUTS;
+    let expected: Vec<&str> = raw["Outputs"]
         .as_array()
         .unwrap()
         .iter()
-        .zip(prepared["network"]["outputs"].as_array().unwrap())
-    {
-        assert_eq!(names[a.as_u64().unwrap() as usize], b.as_str().unwrap());
-    }
+        .map(|a| match lab_names[a.as_u64().unwrap() as usize] {
+            "Steer" => "steering",
+            "Accel" => "acceleration",
+            "Handbrake" => "handbrake",
+            "Brake" => "brake",
+            "Boost" => "boost",
+            other => panic!("unknown output {other}"),
+        })
+        .collect();
+    let got: Vec<&str> = prepared["network"]["outputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(got, expected);
+    assert_eq!(got[0], "steering", "the game's first output is steering");
+    // the simulator's own rally template agrees on steering then acceleration
+    let template: serde_json::Value =
+        serde_json::from_str(include_str!("../assets/simulation/networks/rally.json")).unwrap();
+    assert_eq!(template["outputs"][0].as_str().unwrap().to_lowercase(), "steering");
+    assert_eq!(template["outputs"][1].as_str().unwrap().to_lowercase(), "acceleration");
     let network = altd_sim::nn::network::Network::from_game_export(&prepared["network"]);
     let shape = network.shape.clone();
     let mut expected = vec![];
@@ -348,5 +449,117 @@ fn budget_pause_and_cancellation_do_not_publish_partial_results() {
     store.control(&id, Control::Cancel).unwrap();
     assert_eq!(store.progress(&id).unwrap().status, Status::Cancelled);
     assert!(worker::run(&store, &id).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn queued_cancellation_survives_another_active_worker() {
+    use track_builder::simulation::storage::Control;
+    let root = std::env::temp_dir().join(format!("simulation-cancel-{}", uuid::Uuid::new_v4()));
+    let store = Store::at(root.clone());
+    let id = store.create(&JobSpec::smoke().unwrap()).unwrap();
+    let other_worker = store.lock().unwrap();
+    store.control(&id, Control::Cancel).unwrap();
+    drop(other_worker);
+    let p = worker::run(&store, &id).unwrap();
+    assert_eq!(p.status, Status::Cancelled);
+    assert_eq!(p.completed_generations, 0);
+    assert!(p.observations.is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn completed_progress_is_not_replaced_by_late_control() {
+    use track_builder::simulation::storage::Control;
+    let root = std::env::temp_dir().join(format!("simulation-terminal-{}", uuid::Uuid::new_v4()));
+    let store = Store::at(root.clone());
+    let id = store.create(&JobSpec::smoke().unwrap()).unwrap();
+    let p = worker::run(&store, &id).unwrap();
+    for control in [Control::Pause, Control::Cancel] {
+        store.control(&id, control).unwrap();
+        let after = store.progress(&id).unwrap();
+        assert_eq!(after.status, Status::Completed);
+        assert_eq!(after.completed_generations, p.completed_generations);
+        assert_eq!(after.observations.len(), p.observations.len());
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn only_finished_jobs_can_be_removed() {
+    let root = std::env::temp_dir().join(format!("simulation-remove-{}", uuid::Uuid::new_v4()));
+    let store = Store::at(root.clone());
+    let spec = JobSpec::smoke().unwrap();
+    let id = store.create(&spec).unwrap();
+    assert!(store.remove(&id).is_err(), "a queued job can still run");
+    let mut p = store.progress(&id).unwrap();
+    p.status = Status::Paused;
+    store.save_progress(&id, &p).unwrap();
+    assert!(store.remove(&id).is_err(), "a paused job can still resume");
+    p.status = Status::Cancelled;
+    store.save_progress(&id, &p).unwrap();
+    store.remove(&id).unwrap();
+    assert!(!store.job(&id).unwrap().exists());
+    assert!(store.list().unwrap().is_empty());
+    assert!(store.remove("../../etc").is_err(), "only job ids name folders");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn every_settings_card_gets_a_one_change_campaign_whatever_the_current_value() {
+    use track_builder::lab::{advice, gather, library, verdict};
+    use track_builder::simulation::{engine, planner};
+    let lib = library::scan(std::path::Path::new("tests/fixtures/evolution"), None, verdict::WINDOW, verdict::MIN_SIDE);
+    let source = advice::latest(&lib).unwrap();
+    let mut tried = 0;
+    for card in gather::cards(&lib, Some(source)).iter().filter(|c| c.id.starts_with("setting:")) {
+        let dim = card.id.split(':').nth(2).unwrap();
+        if ["Population", "Rewards"].contains(&dim) {
+            continue;
+        }
+        let (input, settings, _) = engine::from_save(&source.path, "fixture").unwrap();
+        let mut spec = JobSpec::new(input, settings, 30.0);
+        match planner::for_card(&lib, &mut spec, card) {
+            Ok(arms) => {
+                tried += 1;
+                assert_eq!(arms.len(), 1);
+                assert_eq!(spec.baseline.difference(&arms[0].settings).len(), 1, "{}: one change only", card.title);
+                spec.alternatives = arms;
+                spec.validate().unwrap();
+            }
+            Err(e) => assert!(e.to_string().contains("no value to test"), "{}: {e}", card.title),
+        }
+    }
+    assert!(tried > 0, "the fixtures have settings cards to simulate");
+}
+
+#[test]
+fn an_untrained_design_starts_from_the_games_settings() {
+    use track_builder::simulation::engine;
+    let root = std::env::temp_dir().join(format!("simulation-fresh-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("evolution")).unwrap();
+    std::fs::create_dir_all(root.join("settings")).unwrap();
+    // a save with a design but no generations, like a network made in the game and not trained
+    let (mut raw, _) = engine::read_gzip(std::path::Path::new("tests/fixtures/evolution/Type 2.evolution")).unwrap();
+    raw["Stats"]["Generations"] = serde_json::json!([]);
+    let save = root.join("evolution/New design.evolution");
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut gz, raw.to_string().as_bytes()).unwrap();
+    std::fs::write(&save, gz.finish().unwrap()).unwrap();
+    // no settings file: a clear error, not a crash
+    let e = engine::from_save(&save, "new").unwrap_err().to_string();
+    assert!(e.contains("hasn't trained yet"), "{e}");
+    let settings = br#"{"Evolution":{"TimeLimit":46,"MutationRate":0.15,"SelectionAlgorithm":1,"CrossoverAlgorithm":0,"SelectionSize":30,"WeightDecay":0,"ShouldEliminate":true,"IsAdaptiveMutationRate":true,"PreserveParentsMode":2,"PreserveParentsSize":3,"ShouldIdleEliminate":false,"Rewards":{"Ratios":[{"Model":{"Metric":0,"Type":0},"Value":100},{"Model":{"Metric":13,"Type":0},"Value":50}]}}}"#;
+    std::fs::write(root.join("settings/local.settings"), settings).unwrap();
+    let (input, s, time) = engine::from_save(&save, "new").unwrap();
+    assert_eq!(time, Some(46.0));
+    assert_eq!(s.mutation_rate, 0.15);
+    assert_eq!(s.selection_algorithm, "tournament");
+    assert_eq!(s.selection_size, 30);
+    assert!(s.eliminate_on_wall && s.adaptive_mutation);
+    assert_eq!(s.preserve_parents, "on_custom");
+    assert_eq!(s.rewards.len(), 2);
+    assert!(input.notes.iter().any(|n| n.contains("hasn't trained yet")));
+    s.validate().unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }

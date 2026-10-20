@@ -1,13 +1,29 @@
 # Evolution Lab: how it's built
 
+## Simulation experiments
+
+Data gathering includes **New simulation campaign**, **Simulate** on supported setting cards,
+and a persistent queue with start/resume/pause/cancel and paired results. Build the worker with
+`cargo build --release --bins` and keep it beside the application. Select real `.track` geometry
+or explicitly choose a frozen generated course; a built-in track name is insufficient.
+
+All experiments use 1,200 cars. Saved weights initialize an experimental population; fresh
+campaigns train independent seed families through selected stages. Settings and nearby design
+exploration are reviewed before creation. The default budget is two active hours per session,
+with generation checkpoints for recovery. Simulation findings stay separate from game history
+and require game confirmation. GPU libraries are user-installed; CPU remains available.
+
+See [simulation experiments](simulation-experiments.md) for complete settings, family accounting,
+provenance, compute controls, CLI usage, attribution and remaining release validation.
+
 The design and the reasoning are in [evolution-lab-spec.md](evolution-lab-spec.md). This page describes the code as
 built.
 
-**Evaluate-only, with one fenced exception.** Nothing in `src/lab/` or `src/gui_lab.rs` writes, creates, copies,
-renames or deletes a file, except the best-lap keeper (`src/lab/keeper.rs`), which writes only
-"<name> (best lap).evolution" copies (see below).
-Saves are read with `std::fs::read`; all results live in memory. `tests/lab.rs::lab_never_writes_files` fails the
-build if a write call appears in those files.
+**Original saves remain read-only.** The best-lap keeper (`src/lab/keeper.rs`) writes only
+its named best-lap copies. Observed analysis reads saves with `std::fs::read` and computes results
+in memory; its source-write guard is covered by `tests/lab.rs::lab_never_writes_files`.
+The evidence ledger and track-name settings use application data. `src/simulation` owns a separate
+artifact store and worker; no simulated result is inserted into the observed library.
 
 ```
 %APPDATA%\AI Learns To Drive\evolution\*.evolution
@@ -105,15 +121,23 @@ The Lab opens on this view. Scope: all tracks, or one track (picked from the lis
 tracks table). Measure: score gain or lap-time gain (% per 10 generations).
 
 **Stage playbook.** For each stage (early / mid / late), runs of 10+ generations (own history only) are grouped by
-each setting: mutation bucket, selection algorithm, parents kept (≤ 5, 6–15, 16–30, > 30), crossover and population
+each setting: mutation bucket, selection algorithm, selection size (≤ 5, 6–15, 16–30, > 30), crossover and population
 (≤ 600, 601–1000, > 1000). Values with fewer than 3 runs are ignored, and a setting needs two such values to say
-anything. The best value is the one with the highest median gain. Its evidence:
+anything. Each network contributes its median run gain per setting and stage; related networks are then
+collapsed to one median per detected family. The best value has the highest median of these family results.
+Raw run and network counts remain visible alongside the family count. Its evidence:
 
-- **beats** = the chance that a random run with the best value out-gained a random run with the runner-up (ties
+- **beats** = the share of family-median pairs where the best value out-gained the runner-up (ties
   count half)
-- **strong**: best has 8+ runs, runner-up 5+, beats ≥ 70%
-- **some evidence**: best has 5+ runs, runner-up 3+, beats ≥ 60%
+- **strong**: best has 8+ families, runner-up 5+, beats ≥ 70%
+- **some evidence**: best has 5+ families, runner-up 3+, beats ≥ 60%
 - **guess**: anything less, or a gap under 1 point per 10 gens however consistent
+
+Families follow the detected shared-history ancestry, including siblings whose original ancestor is absent.
+They are a conservative proxy for independent evidence, not proof of statistical independence. A family may
+have tried both values and contributes at most once to each. Repeated runs or forks cannot increase its count.
+Previously strong suggestions may become guesses, and rankings can change when a prolific family's runs no
+longer dominate. Historical examples below predate this change and are not current confidence estimates.
 
 If the best mutation bucket's median is under +1% per 10 gens, the card says the stage is **flat**: no mutation
 rate moved it, so rewards, track or network are the levers left.
@@ -151,8 +175,11 @@ side panel has the same suggestions for that network. Suggestions are shown, nev
 
 Judged by lap time when the current run is on a fixed track with laps, otherwise by score. In order:
 
-1. **Timing** (always first): stalled (time to change something), or the current settings have run fewer than
-   *N*/2 generations (wait so the last change can be judged), or still improving (no need to change).
+1. **Timing** (after any best-lap backup prompt): if a settings change has run fewer than the configured minimum
+   generations per side (10 by default), wait the remaining generations before changing again. This takes priority
+   over an older stall. Once that minimum is reached, stall advice can appear; it explicitly notes that the stall
+   may include earlier settings. Otherwise, show the existing still-improving advice. Completing the minimum window
+   does not guarantee a conclusive verdict: missing data, confounds and noise can still prevent one.
 2. **Playbook** for the network's current stage, from its own track first (some evidence or better) and then all
    tracks: "Try <setting> <value> (now <value>)" where the best-known value differs, "Keep …" where it already
    matches, each with its evidence label and why. All-tracks mutation picks are shown even as guesses. A flat stage
@@ -179,8 +206,8 @@ change is placed to within a snapshot interval (10–100 gens), and a design cha
 - **Params** = Σ (inputs + 1) × outputs over the layers, which matches the game's `TotalParams`.
 - **Outputs:** Steer, Accel, Handbrake, Brake, Boost.
 
-Design features are fixed per network, so they're counted **per network**: each network's runs at a stage collapse
-to one median before comparing, and evidence labels use network counts. The playbook has four design rows (raycasts
+Design comparisons use **family medians**: each network's runs at a stage collapse to one median, then related
+networks collapse to one family result. Evidence labels use family counts. The playbook has four design rows (raycasts
 ≤ 8 / 9–11 / 12+, outputs, hidden layers, network size in params), shown under each stage card. The **Network
 designs** tab shows those picks per stage; every input and output with the networks that have it against those
 without, per stage; tracks lapped by networks of different designs (fastest lap and generations spent there); and
@@ -302,6 +329,104 @@ Shown on Now training below the chart. The save holds the network's weights and 
 
 ## GUI notes
 
+- **Experiment cards count direct tests, and early stages use score per second (fixed Oct 2026).** A player ran
+  the "early stage: Tournament v Best" card on Rally.weekly and got a clean verdict, but the card didn't move: the
+  cards were built from the lap-time playbook only, and early-stage networks usually have no laps, so neither the
+  runs nor the switch counted. Now each stage is judged on lap time only where most of its runs have laps (10+
+  runs, at least half), otherwise on score per second; and each settings card counts **direct tests**: clean
+  before/after verdicts in one network that switched just that setting between the two values (helped = the new
+  value won). Direct tests from three agreeing families with none against settle the question and drop the card. When the
+  between-network counts are already enough but the answer is still unclear, the card's progress shows direct
+  families with direct tests (of 3) instead of pooled family counts. Repeated tests within a family count once;
+  conflicting results keep that family on both sides and prevent settlement. The protocol also says not to change the time limit in the 10 gens before a
+  switch (two of that player's three switches came one generation after a time-limit raise and couldn't be judged).
+  Direct tests now use the card's declared measure and a placebo threshold calibrated on that same measure,
+  rather than reusing the timeline's score verdict. Improving scores with worsening laps therefore count against
+  a lap-time experiment. Missing lap data is insufficient evidence, never a score fallback or a within-noise test.
+  Cards display their measure, and settings ledger IDs include it so changing a stage's measure starts a separate
+  evidence history. Existing timeline verdicts retain their score/reward-change behavior.
+  The most visible effect is corrected direct-test counts: a question can reappear if score-based wins previously
+  closed it, or its counts can move toward the other setting. This is a recalculation of existing saves; no new
+  training is required to see it. A card's verdict tests the change in improvement slope, not just whether the
+  final lap is faster: for example, flat laps before a switch and steadily slower laps afterwards count against
+  the new setting even if scores improve. Early-stage score/sec tests likewise use median score divided by
+  simulated generation time. The older timeline can therefore show a score win while a lap-time card shows a loss.
+
+- **Lap-time forecast replaces the raw curve (Oct 2026).** The replay showed the exponential curve fit did worse
+  than assuming no change (median miss 0.94% v 0.44% at 50 gens, 1.59% v 1.10% at 100, with large outliers: mean
+  4–8%), and its "levelled off" call was nearly always wrong: after 40+ generations with no new best, a lap 0.5%+
+  faster still came within 100 generations 34 of 50 times (usually after a settings or time-limit change). A
+  bake-off over the same history (target: best lap so far 50 and 100 gens later; each network forecast from the
+  *other* networks' history) compared no change, the raw curve, straight-line trends, damped trends, shrunk
+  curves, pooled improvement and blends. The winner, robust across nearby weightings, is now `projection::forecast`:
+  **half the pooled improvement** (median relative gain of the best-so-far lap over the same horizon across your
+  other networks: about 0.33% per 50 gens, 1.05% per 100, 1.7% per 200) **plus half the network's own curve shrunk
+  to 20% of its predicted gain**, kept non-increasing. Replay: closer than no change 67% of the time at 50 gens
+  (median miss 0.47% v 0.44%, mean 1.29% v 1.39%) and 73% at 100 (0.72% v 1.10%; mean 2.06% v 1.95%). Honest
+  reading: at 50 gens it's about as good as no change but avoids the big misses; at 100 it's clearly better in the
+  typical case. Small sample (8–9 networks). The Now panel shows the forecast at 50/100 gens with the 80% miss range
+  from the replay, generations to each milestone within 200 gens, and, after 10+ gens with no new best, how often
+  other networks in that spot found a faster lap; no plateau or "levelled off" claim any more. The chart draws the
+  forecast best lap dashed. The Data gathering replay table compares forecast, no change and the old curve.
+
+- **Data gathering tab** (`lab::gather`, `lab::ledger`). Four parts:
+  1. *Experiments worth running*: open questions behind current advice, ranked by weakness of the evidence
+     (guess > some evidence; strong ones are dropped), size of the gap, families still needed for the next strength
+     level (some evidence: 5 v 3 families, 60% beats; strong: 8 v 5, 70%), and ×2 when the network being trained is at
+     that stage ("can do now"). Each card says how to run it (a within-network A then B, 10+ gens each, nothing else
+     changed), the evidence so far, and what each result would mean. Three fixed cards cover what only habits can
+     fix: a time-limit raise on its own (with laps both sides; 0 of 308 so far), clean reward switches (4 of 203;
+     target 30), and a random-track network moved to a fixed track (0).
+  2. *Habits that feed the evidence*: held 10+ gens (23% of 654 changes), changes within 5 gens of a time-limit
+     change (61%), several settings at once (8%), lone time-limit raises, clean reward switches.
+  3. *How accurate have the predictions been?*: the lap projection replayed at every 20th generation (same track
+     for the horizon) against the actual pace, and against "no change" (pace stays at its best so far). At the time
+     of writing the projection is **worse than no change** (median error 0.99% v 0.57% at 50 gens, 1.57% v 1.05% at
+     100, biased optimistic), and 9 of 11 "levelled off" calls were followed by a lap 0.5%+ faster within 100 gens.
+     The Now training projection panel now shows this track record. Before/after verdicts: 4 of 32 clear against
+     1.6 expected by chance.
+  4. *Evidence ledger*: each card's data points and the habit totals, one entry per day in
+     `%APPDATA%\Cat's AI Ltd Tools\evidence-ledger.json` (180 days kept), shown as now / 7 / 30 days ago / since the
+     first entry. The Lab's third fenced write, same rules as the track names file.
+
+- **Backups are per track, and "safe" means the network is saved, not just the record (fixed Oct 2026).** Two bugs
+  found in review: (1) the keeper kept one copy per network and compared only the current track, so after switching
+  from track A to B the first B best overwrote A's copy (which has no B laps), losing A's best weights. Copies are
+  now "<name> (best lap · <track>).evolution", one per network and track; which track a copy holds is read from its
+  last generation, so old "(best lap)" copies still count for their track and renaming a track doesn't orphan one.
+  (2) "Best lap is safe" accepted any save whose history included the best generation, even a copy saved after the
+  network got slower (it keeps the record, not the weights). A save holds the network as of its last generation, so
+  a backup now has to end on this track with a lap within 0.1% of the best. Snapshots aren't counted (the game
+  may not be able to load them); the closest one is still mentioned when the best is lost.
+
+- **Usage is now sensitivity, not weight size.** The old estimate passed importance backwards in proportion to
+  |weight|. On real saves (4+ hidden layers) it gave every output the same input ranking (largest per-output gap
+  0.00–0.07× an even share on all but the 1-layer network), and it ignores signs, so two paths that cancel looked
+  "used". The game's code names `PointwiseTanh`, so hidden layers are tanh. `netviz::sensitivity` samples 256 input
+  states (raycasts 0..1, other sensors −1..1, fixed seed), runs the network forward, back-propagates each output and
+  averages |∂output/∂input| per unit change. Checks on the 33 saves: per-output differences are real (0.2–2.9×),
+  rankings are stable between snapshots of settled networks (Spearman ρ 0.9–1.0), and agree moderately with the old
+  estimate (ρ 0.3–0.9). Caveat kept in the UI: the save doesn't record what the car sees or how the game scales
+  inputs. Used for the fan, bars, most/least used, the swap card, usage shifts and the grids below; `importance`
+  still sizes hidden neurons in the diagram.
+- **Usage grids (Now training, Still learning):** "What it uses, snapshot by snapshot" — inputs (rays left to right
+  by angle, then sensors) × snapshots, coloured by × an even share with the value in each cell and a trend column
+  (first to last). Beside it, "What each control uses (now)" — inputs × outputs. A line per output names the three
+  inputs it leans on. Replaces the line chart.
+- **What your networks use (What's worked best):** one entry per network with its own history (current weights;
+  latest track when a track is selected). Rays are relative to an even share among that network's rays (so networks
+  with more sensors compare fairly); other sensors relative to all inputs. A fan of every ray angle used (faint under
+  3 networks; hover for steering vs speed-control usage and the stage split), a table by angle band with left and
+  right pooled and split, and a sensor table. Headline at the time of writing: 5–15° rays are relied on most (1.19×
+  over 68 rays), 80–95° least (0.85×, 54 rays); the straight-ahead ray is slightly below even (0.93×).
+
+- **Clean test tracker** (Now training, under the tiles): the latest change's status from its verdict: judged (with
+  the result), counting up to 10 generations after it, or why it can't be judged (the settings before it ran under
+  10 gens, rewards changed without laps, track changed). Then whether the current settings are ready to be the
+  "before" of the next change: generations at the current settings, counted from the last time-limit change, out of
+  10. And the library total: 32 of 654 changes (5%) were judgeable at the time of writing. Replaces the "These
+  settings have only run N generations" suggestion on that tab.
+
 - **Track names.** The game's built-in tracks are packed inside the game's `.pck`, which is encrypted, so a save
   only knows them by `TrackId` (the game's settings, challenge and log files don't name them either). Unnamed
   tracks now show the network that trained most on them ("Built-in c75c00e2 · Type 2's track"; hover for all
@@ -336,10 +461,30 @@ Shown on Now training below the chart. The save holds the network's weights and 
   reward changes judged (1 clearly hurt), 8 without laps, 186 too short: most reward changes come within 10
   generations of the previous change.
 - **Reward setups table** (What's worked best, under the stage cards): one row per combination of rewards (weights
-  ignored): runs, networks, median lap gain per 10 gens at each stage, generations from starting a track to its
-  first lap (for starts that mostly used that setup until then; "reached/total", with starts of 20+ gens that never
-  lapped counted), the fastest lap with it (one track only), and the lap-time verdicts for switching to it. Setups
-  with under 3 runs and under 2 track starts are hidden behind a button.
+  ignored): runs, networks, median lap gain per 10 gens at each stage, the fastest lap with it (one track only), and
+  the lap-time verdicts for switching to it. Setups with under 3 runs are hidden behind a button. (A "generations to
+  first lap" column was removed: the transfer analysis below showed the first lap nearly always comes the generation
+  the time limit first allows it, so the column measured the player's time-limit schedule, not the rewards.)
+
+- **Head-to-head on this track** (`src/lab/h2h.rs`), on What's worked best when a track is selected. Every network
+  (not keeper copies) with 10+ generations of its own on the track, x-axis = generations *on that track* so a car
+  that arrived late isn't penalised. Summary grid: car, gens here, first lap (gens on track), best lap, forecast
+  +100 (networks still on the track), design, rewards. Chart toggles best car's speed (BestAverageSpeed), middle
+  car's speed (median score/s) and lap time; y-range is the 2nd–98th percentile, time-limit steps are marked.
+  "At the same time limit" compares best/middle/lap only at limits two or more networks used (speed depends on the
+  limit). "What differs" lists car, design, rewards, population and time-limit steps; when rewards differ, speed is
+  flagged as comparable only where they matched, lap time always. Only lap time is fully car- and reward-neutral.
+
+- **Mutation and selection, as the game does them** (`src/lab/mutation.rs`, read from `AILearnsToDrive.dll`). Every
+  child gets Gaussian noise on every weight (sd = rate × √(2 / (inputs + outputs)) of that layer) and every bias
+  (sd = 0.1 × rate) each generation; the rate is a noise size, not a probability. *Adaptive mutation rate* multiplies
+  the rate by 0.516777 / (0.262982 + 0.050982·ln(params + 1) − 0.000139·L − 0.000278·L²), L = layer count, clamped
+  to 0.1–10: about ×0.85 for 1,000-param networks, ×0.98 for 200. It's fixed per design, not adaptive over time. Saves
+  don't record the flag, so the Lab reads `settings/local.settings` (gzipped JSON) next to the evolution folder and,
+  when it's on, shows "≈ x used" next to the rate on the Current settings tile, run hovers and the runs table.
+  Older runs may have had it off. `SelectionSize` is how many top cars are picked as parents; *Preserve parents*
+  (mode 0 off, 1 the selected parents, 2 a custom size) decides how many carry over unchanged and isn't saved either,
+  so the playbook dimension is now called **Selection size** (ledger ids keep the old "Parents kept" name).
 
 - The library is scanned on a background thread. Every 5 s the UI thread lists the folder's mtimes (cheap); if any
   changed, a new scan re-parses only those files. If a read fails (the game mid-save), the last good copy stays on
@@ -388,3 +533,47 @@ change, compared with ordinary points in training with no reward change nearby (
 Decision: don't build the suggestion yet. It would mostly be reporting noise and time-limit effects. What would
 make it possible: holding a reward setup (and the time limit) for 10+ generations after a change. Re-run when there
 are 30+ clean switches.
+
+## Analysis: transfer between tracks, and population collapse (Oct 2026)
+
+One-off analyses (not in the app).
+
+**Transfer.** 31 track starts in own history: 14 on a network's first track, 17 after training elsewhere (none after
+random-track training; Test Random 1 never moved to a fixed track). The first lap nearly always arrives the
+generation the time limit first becomes long enough for it (median 0 generations after, both groups): with a
+distance-only reward and a rising time limit, the network can already get round by the time the limit lets it. So
+"generations to first lap" measures the time-limit schedule, not learning or transfer. First-lap time relative to
+the track's best is no different (median about 1.18 fresh vs 1.13 transferred, and "best" depends on how long each
+track was trained). Only two tracks have both a fresh and a transferred start. Not buildable. A real test: move Test
+Random 1 (or a fork of it) to a track another network learned from scratch, using the same time-limit steps, and
+compare lap times at the same generation count on that track.
+
+**Population collapse (spread).** 4,397 generation points (same track, time limit and settings for the next 30
+gens), spread smoothed over 5 gens, against score/sec change and new best laps in the next 30 gens. No consistent
+"low spread then stall" pattern: at the mid stage the lowest spread fifth set new best laps more often (87%) than
+the highest (28%), the opposite of the hypothesis and probably confounded by curriculum phase. Within each network,
+its lowest-spread fifth gained slightly less score/sec (−0.1% vs +2.5%) but set new best laps slightly more often
+(70% vs 62%). Below 0.1 spread (85 points, 6 networks) there's a weak sign of trouble (median −4% score/sec, new best
+lap 47%), but the points are heavily autocorrelated, so that's maybe ten episodes. Not built as a warning; revisit
+with more data.
+
+## Analysis: would another score measure make verdicts less noisy? (Oct 2026)
+
+Most clean changes come back "within noise". One idea was that the middle car's score is bimodal (it either
+finishes the lap or crashes), so the top-quarter car might be steadier. Each verdict was re-run on the 40 testable
+score changes (own history, keeper copies excluded) with the median swapped for another per-generation score, each
+with its own placebo threshold, and compared with the lap-time verdict on the same change where both had |z| > 1:
+
+| Measure | Placebo threshold | Conclusive | Agrees with lap direction |
+|---|---|---|---|
+| Median (current) | 4.19 | 4 | 3 of 5 |
+| Third quartile | 4.32 | 3 | 4 of 7 |
+| First quartile | 4.17 | 4 | 6 of 8 |
+| Mean | 4.62 | 4 | 2 of 6 |
+| Best car | 5.21 | 7 | 9 of 9 |
+| (Median + Q3) / 2 | 4.59 | 3 | 3 of 5 |
+
+Windows of 15 and 30 gave the same picture (best car: 9 and 7 conclusive, 7/7 and 11/11 agreeing with laps; median
+4 and 3). The third quartile is no better than the median. The best car's score roughly doubles the conclusive
+verdicts and always pointed the same way as lap time, which makes sense: the lap time is the best car's. It's 40
+changes, so this is a lead, not a result. Not built; a best-car verdict alongside the median one is the candidate.

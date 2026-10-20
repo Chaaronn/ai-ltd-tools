@@ -62,7 +62,8 @@ fn label(dim: &str, r: &Run) -> Option<String> {
 /// Is the network's best lap on its current track safe in a copy?
 #[derive(Clone, Debug, PartialEq)]
 pub enum Backup {
-    /// Another save's history includes the generation that set the best lap.
+    /// Another save of this network (a copy or fork) holds a network that laps this track at
+    /// least as fast: its last generation is on this track with a lap within `SAME_LAP`.
     Safe { copy: String },
     /// The current network is (still) as fast as the best and no copy holds it: save one now.
     Needed,
@@ -101,14 +102,21 @@ pub fn best_lap(lib: &Library, n: &Network) -> Option<BestLap> {
         .min_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))?;
     let recent = g.iter().rev().take(5).filter_map(|x| x.best_lap).reduce(f64::min);
     let mine: Vec<u64> = g.iter().map(|x| x.hash).collect();
-    // a copy saved at or after the best generation shares at least at + 1 records
+    // A copy protects the best lap only if the network it saved is that fast: a save holds the
+    // network as of its last generation, so that generation must be on this track with a lap at
+    // least as good. Sharing the history that recorded the lap isn't enough: a copy saved after
+    // the network got slower keeps the record but not the weights.
     let copy = lib
         .networks
         .iter()
-        .filter(|o| o.path != n.path)
+        .filter(|o| o.path != n.path && !o.save.gens.is_empty())
         .filter(|o| {
             let theirs: Vec<u64> = o.save.gens.iter().map(|x| x.hash).collect();
-            super::forks::shared_prefix(&mine, &theirs) > at
+            super::forks::shared_prefix(&mine, &theirs) > 0
+        })
+        .filter(|o| {
+            let k = runs::track_keys(&o.save.gens);
+            k.last() == Some(&run.track) && o.save.gens.last().and_then(|x| x.best_lap).is_some_and(|l| l <= seconds * (1.0 + SAME_LAP))
         })
         .max_by(|a, b| a.mtime.total_cmp(&b.mtime))
         .map(|o| o.file.clone());
@@ -170,13 +178,9 @@ pub fn advise(lib: &Library, n: &Network) -> Option<Advice> {
         }
     }
     // 1. timing: is it time to change anything?
-    if n.since_gain >= runs::STALL_GENS {
-        out.push(Suggestion {
-            strength: Strength::Fact,
-            text: format!("Stalled for {} generations: the current settings have stopped paying off, so it's time to change something.", n.since_gain),
-            why: "The median hasn't beaten its best on this track and rewards by 1% in that time.".into(),
-        });
-    } else if run.len() < min_side && n.runs.len() > 1 {
+    // A historical stall can predate the latest change. Give that change its observation
+    // window before using the stall to recommend another intervention.
+    if run.len() < min_side && n.runs.len() > 1 {
         let mut why = format!("A change needs {min_side} generations either side to be judged against noise.");
         if let Some(plan) = detectability::forward_plan(lib, n) {
             let det = detectability::format_forward_advice(&plan);
@@ -193,6 +197,12 @@ pub fn advise(lib: &Library, n: &Network) -> Option<Advice> {
             ),
             why,
         });
+    } else if n.since_gain >= runs::STALL_GENS {
+        out.push(Suggestion {
+            strength: Strength::Fact,
+            text: format!("Stalled for {} generations: no meaningful gain yet, so consider changing something.", n.since_gain),
+            why: format!("The median hasn't beaten its best on this track and rewards by 1% in that time. The current settings have run for at least {min_side} generations; the stall may also include earlier settings."),
+        });
     } else {
         let lap_note = match lap {
             (Some(a), Some(b)) if a < b - 1e-6 => format!(" Best lap {b:.3} s → {a:.3} s over the last 20 generations."),
@@ -205,46 +215,27 @@ pub fn advise(lib: &Library, n: &Network) -> Option<Advice> {
         });
     }
 
-    // 1b. where is the lap-time curve heading?
-    if let Some(p) = super::projection::project(n) {
-        match p.plateau {
-            Some((lo, _, hi)) if (hi - lo).abs() < 1e-9 && (p.best - lo).abs() < 1e-9 => out.push(Suggestion {
-                strength: Strength::Fact,
-                text: format!(
-                    "Lap time has levelled off at {:.3} s: no faster lap for {} generations. More of the same settings is unlikely to help; change something.",
-                    p.best,
-                    p.to - p.best_at
+    // 1b. where is the lap time heading? (the forecast: see projection::forecast)
+    let drift = super::projection::pooled_drift(lib, Some(&n.file));
+    if let Some(f) = super::projection::forecast(n, &drift) {
+        let (a50, a100) = (f.at(50), f.at(100));
+        let odds = super::projection::faster_odds(lib, Some(&n.file));
+        let spot = odds.iter().find(|o| o.3.contains(&f.since_best)).filter(|o| o.2 >= 5 && f.since_best >= 40);
+        out.push(Suggestion {
+            strength: Strength::Fact,
+            text: match spot {
+                Some((_, k, m, _)) => format!(
+                    "No new best lap for {} generations. That's not necessarily the end: in your other networks, a lap 0.5%+ faster came within 100 gens {k} of {m} times from that spot, often after a change. Forecast on current form: {a100:.3} s in 100 gens (best {:.3} s).",
+                    f.since_best, f.best
                 ),
-                why: format!("Best lap over gens {}–{}.", p.from, p.to - 1),
-            }),
-            Some((lo, mid, hi)) if p.best - mid < p.best * 0.001 => out.push(Suggestion {
-                strength: Strength::Fact,
-                text: format!(
-                    "Lap time is levelling off around {mid:.3} s (best {:.3} s): at most about {:.3} s more to gain at these settings.",
-                    p.best,
-                    (p.best - lo).max(0.0)
-                ),
-                why: format!("Curve fitted to the best lap over gens {}–{} (range {lo:.3}–{hi:.3} s across shorter and longer windows).", p.from, p.to - 1),
-            }),
-            Some((lo, mid, hi)) => out.push(Suggestion {
-                strength: Strength::Fact,
-                text: format!(
-                    "Lap time is heading for about {mid:.3} s (range {lo:.3}–{hi:.3}).{}",
-                    p.gens_to(p.best - 0.1).map_or(String::new(), |g| format!(" Another 0.1 s should take about {g:.0} generations."))
-                ),
-                why: format!("Curve fitted to the best lap over gens {}–{}.", p.from, p.to - 1),
-            }),
-            None if p.per_100 > 0.0 => out.push(Suggestion {
-                strength: Strength::Fact,
-                text: format!("Lap pace has been getting slower lately ({:+.3} s per 100 gens), so there's no plateau to project.", p.per_100),
-                why: format!("Best lap over the trailing 5 generations, gens {}–{}.", p.from, p.to - 1),
-            }),
-            None => out.push(Suggestion {
-                strength: Strength::Fact,
-                text: format!("Lap time is still falling steadily ({:+.3} s per 100 gens) with no plateau in sight yet.", p.per_100),
-                why: format!("Curve fitted to the best lap over gens {}–{}.", p.from, p.to - 1),
-            }),
-        }
+                None => format!("Lap time forecast: about {a50:.3} s in 50 gens and {a100:.3} s in 100 (best now {:.3} s).", f.best),
+            },
+            why: format!(
+                "Half your other networks' typical gain over the same generations ({:.2}% per 100), half this network's own curve shrunk to {:.0}%. Replayed over your history it beats assuming no change most of the time; see Data gathering.",
+                drift.at(100.0) * 100.0,
+                super::projection::CURVE_SHRINK * 100.0
+            ),
+        });
     }
 
     // 2. the playbook for this stage: this track first, then all tracks
@@ -280,7 +271,7 @@ pub fn advise(lib: &Library, n: &Network) -> Option<Advice> {
                         out.push(Suggestion {
                             strength: p.strength,
                             text: format!("For your next network: {} {} has learned faster at this stage (this one has {}).", p.dimension.to_lowercase(), p.best.label, cur),
-                            why: format!("{why} Counted per network, since a design is fixed for a whole network."),
+                            why: format!("{why} Counted per detected family, so repeated runs and related saves do not multiply the evidence."),
                         });
                         seen.push(p.dimension);
                     }

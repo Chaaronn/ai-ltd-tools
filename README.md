@@ -30,11 +30,44 @@ You can also open an existing `.track` file to preview and check it.
 
 The **Evolution Lab** tab (top of the window) reads your saved networks from
 `%APPDATA%\AI Learns To Drive\evolution` and shows which training settings worked. It never
-changes your saves. Its one write is optional: a "<name> (best lap)" copy of a network
+changes your original saves. Its optional game-folder write is a "<name> (best lap)" copy of a network
 whenever it sets a new best lap, overwritten only by a faster one, so a later regression can't lose it.
 
+**Built-in simulation experiments:** the Evolution Lab's Simulation tab has a campaign builder and a
+persistent simulation queue. Build both executables with `cargo build --release --bins`; keep
+`simulation-worker.exe` beside `track-builder.exe`. Experiments use the pinned `driving_sim_rs`
+engine in a separate headless process with **1,200 cars**, explicit settings, paired controls,
+and resumable generation checkpoints. Choose saved weights, fresh training, settings exploration,
+or nearby designs. Supply a `.track` file or explicitly choose frozen generated geometry.
+Simulation writes only to `%LOCALAPPDATA%\CatsAiLtdTools\simulation-v1`, never to playable networks.
+
+CPU works without an external backend. GPU support uses a matching **user-installed** library
+through `ALTD_GPU_LIB`; compatibility checks and CPU fallback record the actual backend used.
+The default session budget is two active hours. Results are simulation screening evidence,
+kept separate from the game evidence ledger. See [simulation experiments](.docs/simulation-experiments.md)
+for semantics, CLI commands, attribution, recovery and validation limits.
+
 - **Rewards:** reward changes get a before/after verdict on lap time (scores aren't comparable across rewards), and
-  What's worked best has a reward setups table: lap gain by stage, generations to a first lap, fastest lap.
+  What's worked best has a reward setups table: lap gain by stage, fastest lap, and how switching to each went.
+- **Head-to-head on a track** (What's worked best, with a track picked): every network that trained there lined up by
+  generations on that track: best lap, forecast, a speed/lap chart, best and middle car at matching time limits,
+  and a list of what differs (car, design, rewards, population, time-limit steps).
+- **Mutation actually used:** with the game's adaptive mutation on (read from its settings file), the Lab shows
+  the rate the game really applies for each network's size next to the rate as set.
+- **Data gathering** tab: the experiments that would firm up the advice most, how your training habits feed the
+  evidence, how accurate the lap projection has been on your own history, and a daily record of the evidence growing.
+  Each experiment displays its measure. Direct tests use that measure too: a score improvement cannot count as
+  a lap-time win, and missing laps do not count as a completed lap-time test. Corrected counts may reopen questions
+  that previously appeared settled.
+  Evidence strength uses one result per detected network family, with raw network and run counts shown alongside.
+  Repeated runs and forks cannot turn one family's results into strong evidence; settling a direct-test question
+  requires agreement from three families with no opposing result.
+- **What the networks use:** on Now training, grids of each input's use over the snapshots and per control
+  (steer, accelerate, brake, boost); on What's worked best, which ray angles and sensors your networks rely on.
+- **Clean test tracker** on Now training: how close the last change is to being judged, when the next change
+  can be made, and how many of your changes so far could be judged.
+  Timing advice gives a recent settings change its minimum observation window before recommending another change,
+  even when a stall began under the previous settings.
 - **Track names:** built-in tracks show the network that trained most on them, and you can name them (stored in
   the tool's settings, not the game's folder).
 - **Swap candidates:** when a sensor is barely used, Now training lists sensors to try instead, with the evidence
@@ -49,7 +82,7 @@ whenever it sets a new best lap, overwritten only by a faster one, so a later re
   settings: whether to wait or change, what the evidence says for this stage and track, and what worked for this
   network before. Every network's side panel has the same suggestions. Nothing is changed in the game.
 - **What's worked best** (opens first): for each training stage (early / mid / late / veteran: under 200, 1,000, 5,000 generations, and beyond), the best mutation rate,
-  selection, parents kept, crossover and population, each marked strong evidence, some evidence or a guess. Scope it
+  selection, selection size, crossover and population, each marked strong evidence, some evidence or a guess. Scope it
   to all tracks or one track, and pick the measure: lap time (default), score, score per second or survival (score
   depends on your reward weights; the game doesn't record distance or a real speed). A track shows its fastest lap and the settings history
   that got there. Below that: the biggest single gains, plain-English findings, and a table of every track.
@@ -91,3 +124,5 @@ Two binaries:
 
 See [.docs/](.docs/README.md). It covers everything learned about the game (file format, all 138 tile
 orientations, connection rules, the racing-line maths, the `.evolution` save format) and the design of both tools.
+
+The interface uses IBM Plex Sans and IBM Plex Mono (SIL Open Font License; `assets/fonts/OFL-IBM-Plex.txt`), embedded in the executable.
